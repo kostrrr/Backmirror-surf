@@ -7,94 +7,88 @@ DAYS = ["Mittwoch", "Donnerstag", "Freitag", "Samstag", "Sonntag"]
 
 def heat_color(percent):
     if percent == 100:
-        return "#b00000"      # sehr dunkel rot
+        return "#b00000"      # Alarm-Rot
     elif percent >= 80:
-        return "#d9480f"      # dunkel
+        return "#d9480f"
     elif percent >= 60:
-        return "#f49300"      # mittel
+        return "#f49300"
     elif percent >= 40:
-        return "#ffd43b"      # hell
+        return "#ffd43b"
     else:
-        return "#fff4cc"      # sehr hell gelb
+        return "#fff4cc"
 
 SESSIONS = [
+    {
+        "day": "Mittwoch",
+        "start": "15:15",
+        "end": "16:00",
+        "text": "Basic\n6 / 10 (60%)",
+        "color": heat_color(60),
+    },
     {
         "day": "Freitag",
         "start": "18:45",
         "end": "19:30",
-        "type": "Basic Intense",
-        "max": 5,
-        "used": 5
+        "text": "Basic Intense\n5 / 5 (100%)",
+        "color": heat_color(100),
     },
     {
         "day": "Samstag",
         "start": "14:45",
         "end": "15:30",
-        "type": "Basic Intense",
-        "max": 5,
-        "used": 3
+        "text": "Basic Intense\n3 / 5 (60%)",
+        "color": heat_color(60),
     },
     {
         "day": "Sonntag",
         "start": "14:00",
         "end": "14:30",
-        "type": "Employee",
-        "max": None,
-        "used": None
-    },
-    {
-        "day": "Mittwoch",
-        "start": "15:15",
-        "end": "16:00",
-        "type": "Basic",
-        "max": 10,
-        "used": 6
+        "text": "Employee\nnicht buchbar",
+        "color": "#cccccc",
     }
 ]
-
-RENDER_SESSIONS = []
-for s in SESSIONS:
-    if s["type"] == "Employee":
-        color = "#cccccc"
-        text = "Employee\nnicht buchbar"
-    else:
-        percent = int((s["used"] / s["max"]) * 100)
-        color = heat_color(percent)
-        text = f"{s['type']}\n{s['used']} / {s['max']} ({percent}%)"
-
-    RENDER_SESSIONS.append({
-        "day": s["day"],
-        "start": s["start"],
-        "end": s["end"],
-        "text": text,
-        "color": color
-    })
 
 HTML = """
 <!doctype html>
 <html lang="de">
 <head>
 <meta charset="utf-8">
-<title>Session-Auslastung – Woche</title>
+<title>Wochenkalender – Auslastung (%)</title>
 <style>
 body { font-family: Arial, sans-serif; }
-.calendar { display: grid; grid-template-columns: 80px repeat(5, 1fr); }
-.time { border-bottom: 1px solid #eee; font-size: 12px; padding: 4px; }
-.day { border-left: 1px solid #ccc; position: relative; height: 44px; }
-.header { font-weight: bold; text-align: center; padding: 6px; border-bottom: 2px solid #000; }
+.calendar {
+    display: grid;
+    grid-template-columns: 80px repeat(5, 1fr);
+}
+.header {
+    text-align: center;
+    font-weight: bold;
+    padding: 6px;
+    border-bottom: 2px solid #000;
+}
+.time {
+    font-size: 12px;
+    padding: 4px;
+    border-bottom: 1px solid #eee;
+}
+.day-column {
+    position: relative;
+    height: {{ total_height }}px;
+    border-left: 1px solid #ccc;
+}
 .session {
     position: absolute;
-    left: 4px;
-    right: 4px;
-    border-radius: 4px;
+    left: 5px;
+    right: 5px;
     padding: 4px;
     font-size: 11px;
+    border-radius: 4px;
     white-space: pre-line;
 }
 </style>
 </head>
-<body>
 
+<body>
 <h2>Wochenkalender – Auslastung (%)</h2>
 
 <div class="calendar">
@@ -103,36 +97,55 @@ body { font-family: Arial, sans-serif; }
         <div class="header">{{ d }}</div>
     {% endfor %}
 
-    {% for hour in range(11,22) %}
-        <div class="time">{{ "%02d:00"|format(hour) }}</div>
-        {% for d in days %}
-            <div class="day"></div>
-        {% endfor %}
+    <div class="time">11:00<br>–<br>22:00</div>
+    {% for d in days %}
+        <div class="day-column" id="col-{{ d }}"></div>
     {% endfor %}
 </div>
 
 {% for s in sessions %}
 <div class="session"
      style="
-        top: {{ (s.start.split(':')[0]|int - 11)*44 + (s.start.split(':')[1]|int)/60*44 }}px;
-        height: {{ ((s.end.split(':')[0]|int*60 + s.end.split(':')[1]|int) - (s.start.split(':')[0]|int*60 + s.start.split(':')[1]|int)) /60*44 }}px;
-        grid-column: {{ days.index(s.day) + 2 }};
+        top: {{ s.top }}px;
+        height: {{ s.height }}px;
         background: {{ s.color }};
-     ">
+     "
+     data-day="{{ s.day }}">
 {{ s.text }}
 </div>
 {% endfor %}
+
+<script>
+document.querySelectorAll(".session").forEach(el => {
+    const day = el.dataset.day;
+    const col = document.getElementById("col-" + day);
+    if (col) col.appendChild(el);
+});
+</script>
 
 </body>
 </html>
 """
 
+def time_to_px(t):
+    h, m = map(int, t.split(":"))
+    return ((h - 11) * 60 + m) * 44 / 60
+
 @app.route("/")
 def calendar():
+    rendered = []
+    for s in SESSIONS:
+        rendered.append({
+            **s,
+            "top": time_to_px(s["start"]),
+            "height": time_to_px(s["end"]) - time_to_px(s["start"]),
+        })
+
     return render_template_string(
         HTML,
         days=DAYS,
-        sessions=RENDER_SESSIONS
+        sessions=rendered,
+        total_height=time_to_px("22:00")
     )
 
 if __name__ == "__main__":
