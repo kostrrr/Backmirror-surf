@@ -1,7 +1,7 @@
 import os
 from datetime import datetime, timedelta
 from flask import Flask, render_template_string
-app = Flask(name)
+app = Flask(__name__)
 DAYS = ["Mittwoch", "Donnerstag", "Freitag", "Samstag", "Sonntag"]
 PIXELS_PER_HOUR = 44
 # ========= DATENSPEICHER (IN-MEMORY) =========
