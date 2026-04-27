@@ -1,13 +1,16 @@
 import os
+from datetime import datetime, timedelta
 from flask import Flask, render_template_string
 
 app = Flask(__name__)
 
 DAYS = ["Mittwoch", "Donnerstag", "Freitag", "Samstag", "Sonntag"]
 
+PIXELS_PER_HOUR = 44
+
 def heat_color(percent):
     if percent == 100:
-        return "#b00000"      # Alarm-Rot
+        return "#b00000"
     elif percent >= 80:
         return "#d9480f"
     elif percent >= 60:
@@ -17,36 +20,88 @@ def heat_color(percent):
     else:
         return "#fff4cc"
 
-SESSIONS = [
+def time_to_px(t):
+    h, m = map(int, t.split(":"))
+    return ((h - 11) * 60 + m) * PIXELS_PER_HOUR / 60
+
+def parse_time(t):
+    return datetime.strptime(t, "%H:%M").time()
+
+def in_valid_window(start_time):
+    now = datetime.now().time()
+    start = parse_time(start_time)
+    start_dt = datetime.combine(datetime.today(), start)
+    return (
+        start_dt - timedelta(minutes=5)
+        <= datetime.combine(datetime.today(), now)
+        <= start_dt + timedelta(minutes=40)
+    )
+
+# Beispiel-Sessions (Simulation)
+RAW_SESSIONS = [
     {
         "day": "Mittwoch",
         "start": "15:15",
         "end": "16:00",
-        "text": "Basic\n6 / 10 (60%)",
-        "color": heat_color(60),
+        "type": "Basic",
+        "max": 10,
+        "used": 6,
     },
     {
         "day": "Freitag",
         "start": "18:45",
         "end": "19:30",
-        "text": "Basic Intense\n5 / 5 (100%)",
-        "color": heat_color(100),
+        "type": "Basic Intense",
+        "max": 5,
+        "used": 5,
     },
     {
         "day": "Samstag",
         "start": "14:45",
         "end": "15:30",
-        "text": "Basic Intense\n3 / 5 (60%)",
-        "color": heat_color(60),
+        "type": "Basic Intense",
+        "max": 5,
+        "used": 3,
     },
     {
         "day": "Sonntag",
         "start": "14:00",
         "end": "14:30",
-        "text": "Employee\nnicht buchbar",
-        "color": "#cccccc",
-    }
+        "type": "Employee",
+        "max": None,
+        "used": None,
+    },
 ]
+
+def prepare_sessions():
+    rendered = []
+    for s in RAW_SESSIONS:
+
+        # Employee immer anzeigen (keine Zeitregel)
+        if s["type"] == "Employee":
+            rendered.append({
+                "day": s["day"],
+                "top": time_to_px(s["start"]),
+                "height": time_to_px(s["end"]) - time_to_px(s["start"]),
+                "text": "Employee\nnicht buchbar",
+                "color": "#cccccc",
+            })
+            continue
+
+        # Zeitfenster erzwingen
+        if not in_valid_window(s["start"]):
+            continue
+
+        percent = int((s["used"] / s["max"]) * 100)
+        rendered.append({
+            "day": s["day"],
+            "top": time_to_px(s["start"]),
+            "height": time_to_px(s["end"]) - time_to_px(s["start"]),
+            "text": f"{s['type']}\n{s['used']} / {s['max']} ({percent}%)",
+            "color": heat_color(percent),
+        })
+
+    return rendered
 
 HTML = """
 <!doctype html>
@@ -69,7 +124,6 @@ body { font-family: Arial, sans-serif; }
 .time {
     font-size: 12px;
     padding: 4px;
-    border-bottom: 1px solid #eee;
 }
 .day-column {
     position: relative;
@@ -105,11 +159,7 @@ body { font-family: Arial, sans-serif; }
 
 {% for s in sessions %}
 <div class="session"
-     style="
-        top: {{ s.top }}px;
-        height: {{ s.height }}px;
-        background: {{ s.color }};
-     "
+     style="top: {{ s.top }}px; height: {{ s.height }}px; background: {{ s.color }};"
      data-day="{{ s.day }}">
 {{ s.text }}
 </div>
@@ -117,8 +167,7 @@ body { font-family: Arial, sans-serif; }
 
 <script>
 document.querySelectorAll(".session").forEach(el => {
-    const day = el.dataset.day;
-    const col = document.getElementById("col-" + day);
+    const col = document.getElementById("col-" + el.dataset.day);
     if (col) col.appendChild(el);
 });
 </script>
@@ -127,27 +176,17 @@ document.querySelectorAll(".session").forEach(el => {
 </html>
 """
 
-def time_to_px(t):
-    h, m = map(int, t.split(":"))
-    return ((h - 11) * 60 + m) * 44 / 60
-
 @app.route("/")
 def calendar():
-    rendered = []
-    for s in SESSIONS:
-        rendered.append({
-            **s,
-            "top": time_to_px(s["start"]),
-            "height": time_to_px(s["end"]) - time_to_px(s["start"]),
-        })
-
+    sessions = prepare_sessions()
     return render_template_string(
         HTML,
         days=DAYS,
-        sessions=rendered,
-        total_height=time_to_px("22:00")
+        sessions=sessions,
+        total_height=time_to_px("22:00"),
     )
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10000))
     app.run(host="0.0.0.0", port=port)
+``
