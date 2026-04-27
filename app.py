@@ -16,61 +16,67 @@ def heat_color(p):
     if p >= 40:
         return "#ffd43b"
     return "#fff4cc"
+
+
 def time_to_px(hm):
-h, m = map(int, hm.split(":"))
-return ((h - 11) * 60 + m) * PIXELS_PER_HOUR / 60
+    h, m = map(int, hm.split(":"))
+    return ((h - 11) * 60 + m) * PIXELS_PER_HOUR / 60
+
+
 def in_time_window(start):
-now = datetime.now()
-s = datetime.combine(now.date(), datetime.strptime(start, "%H:%M").time())
-return s - timedelta(minutes=5) <= now <= s + timedelta(minutes=40)
-# ========= BEISPIEL-SESSIONS (SIMULATION) =========
-RAW = [
-{"day":"Mittwoch","start":"15:15","end":"16:00","type":"Basic","max":10,"used":6},
-{"day":"Freitag","start":"18:45","end":"19:30","type":"Basic Intense","max":5,"used":5},
-{"day":"Samstag","start":"14:45","end":"15:30","type":"Basic Intense","max":5,"used":3},
-{"day":"Sonntag","start":"14:00","end":"14:30","type":"Employee"}
-]
+    now = datetime.now()
+    s = datetime.combine(
+        now.date(),
+        datetime.strptime(start, "%H:%M").time()
+    )
+    return s - timedelta(minutes=5) <= now <= s + timedelta(minutes=40)
+
+
 def collect_measurement(session, percent):
-MEASUREMENTS.append({
-"date": datetime.now().date(),
-"day": session["day"],
-"start": session["start"],
-"end": session["end"],
-"percent": percent,
-"recorded_at": datetime.now()
-})
+    MEASUREMENTS.append({
+        "date": datetime.now().date(),
+        "day": session["day"],
+        "start": session["start"],
+        "end": session["end"],
+        "percent": percent,
+        "recorded_at": datetime.now()
+    })
+
+
 def prepare_sessions():
-out = []
-for s in RAW:
-top = time_to_px(s["start"])
-height = time_to_px(s["end"]) - top
-    # Employee: anzeigen, aber NIE sammeln  
-    if s["type"] == "Employee":  
-        out.append({  
-            "day": s["day"],  
-            "top": top,  
-            "height": height,  
-            "text": "Employee\nnicht buchbar",  
-            "color": "#cccccc"  
-        })  
-        continue  
+    out = []
+    for s in RAW:
+        top = time_to_px(s["start"])
+        height = time_to_px(s["end"]) - top
 
-    percent = int(s["used"] / s["max"] * 100)  
+        # Employee: anzeigen, aber nie sammeln
+        if s["type"] == "Employee":
+            out.append({
+                "day": s["day"],
+                "top": top,
+                "height": height,
+                "text": "Employee\nnicht buchbar",
+                "color": "#cccccc"
+            })
+            continue
 
-    # ========= SAMMELLOGIK =========
-    if percent == 100 or in_time_window(s["start"]):  
-        collect_measurement(s, percent)  
-    else:  
-        continue  
+        percent = int(s["used"] / s["max"] * 100)
 
-    out.append({  
-        "day": s["day"],  
-        "top": top,  
-        "height": height,  
-        "text": f"{s['type']}\n{s['used']} / {s['max']} ({percent}%)",  
-        "color": heat_color(percent)  
-    })  
-return out  
+        # 100 % immer, sonst nur im Zeitfenster
+        if percent == 100 or in_time_window(s["start"]):
+            collect_measurement(s, percent)
+        else:
+            continue
+
+        out.append({
+            "day": s["day"],
+            "top": top,
+            "height": height,
+            "text": f"{s['type']}\n{s['used']} / {s['max']} ({percent}%)",
+            "color": heat_color(percent)
+        })
+
+    return out
 
 HTML = """
   
