@@ -1,3 +1,4 @@
+import os
 from flask import Flask, render_template_string
 
 app = Flask(__name__)
@@ -16,7 +17,6 @@ def heat_color(percent):
     else:
         return "#fff4cc"      # sehr hell gelb
 
-# Beispielhafte echte Sessions (Simulation)
 SESSIONS = [
     {
         "day": "Freitag",
@@ -52,7 +52,6 @@ SESSIONS = [
     }
 ]
 
-# Aufbereitung für Anzeige
 RENDER_SESSIONS = []
 for s in SESSIONS:
     if s["type"] == "Employee":
@@ -73,7 +72,7 @@ for s in SESSIONS:
 
 HTML = """
 <!doctype html>
-<html>
+<html lang="de">
 <head>
 <meta charset="utf-8">
 <title>Session-Auslastung – Woche</title>
@@ -94,10 +93,49 @@ body { font-family: Arial, sans-serif; }
 }
 </style>
 </head>
-
 <body>
+
 <h2>Wochenkalender – Auslastung (%)</h2>
 
 <div class="calendar">
     <div></div>
     {% for d in days %}
+        <div class="header">{{ d }}</div>
+    {% endfor %}
+
+    {% for hour in range(11,22) %}
+        <div class="time">{{ "%02d:00"|format(hour) }}</div>
+        {% for d in days %}
+            <div class="day"></div>
+        {% endfor %}
+    {% endfor %}
+</div>
+
+{% for s in sessions %}
+<div class="session"
+     style="
+        top: {{ (s.start.split(':')[0]|int - 11)*44 + (s.start.split(':')[1]|int)/60*44 }}px;
+        height: {{ ((s.end.split(':')[0]|int*60 + s.end.split(':')[1]|int) - (s.start.split(':')[0]|int*60 + s.start.split(':')[1]|int)) /60*44 }}px;
+        grid-column: {{ days.index(s.day) + 2 }};
+        background: {{ s.color }};
+     ">
+{{ s.text }}
+</div>
+{% endfor %}
+
+</body>
+</html>
+"""
+
+@app.route("/")
+def calendar():
+    return render_template_string(
+        HTML,
+        days=DAYS,
+        sessions=RENDER_SESSIONS
+    )
+
+if __name__ == "__main__":
+    port = int(os.environ.get("PORT", 10000))
+    app.run(host="0.0.0.0", port=port)
+``
