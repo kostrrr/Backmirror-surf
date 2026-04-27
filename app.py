@@ -4,7 +4,7 @@ from flask import Flask, render_template_string
 app = Flask(name)
 DAYS = ["Mittwoch", "Donnerstag", "Freitag", "Samstag", "Sonntag"]
 PIXELS_PER_HOUR = 44
-========= DATENSPEICHER (IN-MEMORY) =========
+# ========= DATENSPEICHER (IN-MEMORY) =========
 MEASUREMENTS = []
 def heat_color(p):
 if p == 100: return "#b00000"
@@ -19,7 +19,7 @@ def in_time_window(start):
 now = datetime.now()
 s = datetime.combine(now.date(), datetime.strptime(start, "%H:%M").time())
 return s - timedelta(minutes=5) <= now <= s + timedelta(minutes=40)
-========= BEISPIEL-SESSIONS (SIMULATION) =========
+# ========= BEISPIEL-SESSIONS (SIMULATION) =========
 RAW = [
 {"day":"Mittwoch","start":"15:15","end":"16:00","type":"Basic","max":10,"used":6},
 {"day":"Freitag","start":"18:45","end":"19:30","type":"Basic Intense","max":5,"used":5},
