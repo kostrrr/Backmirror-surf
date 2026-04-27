@@ -1,5 +1,3 @@
-START CODE
-(alles in app.py ersetzen, exakt so einfügen)
 import os
 from datetime import datetime, timedelta
 from flask import Flask, render_template_string
@@ -118,4 +116,3 @@ h=time_to_px("22:00")
 if name == "main":
 port = int(os.environ.get("PORT", 10000))
 app.run(host="0.0.0.0", port=port)
-END CODE
