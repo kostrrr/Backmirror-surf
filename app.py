@@ -7,11 +7,15 @@ PIXELS_PER_HOUR = 44
 # ========= DATENSPEICHER (IN-MEMORY) =========
 MEASUREMENTS = []
 def heat_color(p):
-if p == 100: return "#b00000"
-if p >= 80:  return "#d9480f"
-if p >= 60:  return "#f49300"
-if p >= 40:  return "#ffd43b"
-return "#fff4cc"
+    if p == 100:
+        return "#b00000"
+    if p >= 80:
+        return "#d9480f"
+    if p >= 60:
+        return "#f49300"
+    if p >= 40:
+        return "#ffd43b"
+    return "#fff4cc"
 def time_to_px(hm):
 h, m = map(int, hm.split(":"))
 return ((h - 11) * 60 + m) * PIXELS_PER_HOUR / 60
