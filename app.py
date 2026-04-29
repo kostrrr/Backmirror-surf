@@ -1,128 +1,164 @@
 import os
-from datetime import datetime, timedelta
+import requests
+from datetime import datetime
 from flask import Flask, render_template_string
+
 app = Flask(__name__)
-DAYS = ["Mittwoch", "Donnerstag", "Freitag", "Samstag", "Sonntag"]
+
+# Anzeigeparameter
+DAYS = ["Montag", "Dienstag", "Mittwoch", "Donnerstag", "Freitag", "Samstag", "Sonntag"]
 PIXELS_PER_HOUR = 44
-# ========= DATENSPEICHER (IN-MEMORY) =========
-MEASUREMENTS = []
-def heat_color(p):
-    if p == 100:
+
+# In‑Memory‑Speicher für heutige Sessions
+SESSION_STORE = {}
+
+def heat_color(percent):
+    if percent == 100:
         return "#b00000"
-    if p >= 80:
+    if percent >= 80:
         return "#d9480f"
-    if p >= 60:
+    if percent >= 60:
         return "#f49300"
-    if p >= 40:
+    if percent >= 40:
         return "#ffd43b"
     return "#fff4cc"
-
 
 def time_to_px(hm):
     h, m = map(int, hm.split(":"))
     return ((h - 11) * 60 + m) * PIXELS_PER_HOUR / 60
 
+def sync_today_sessions():
+    today = datetime.now().strftime("%Y-%m-%d")
 
-def in_time_window(start):
-    now = datetime.now()
-    s = datetime.combine(
-        now.date(),
-        datetime.strptime(start, "%H:%M").time()
+    url = (
+        "https://oana.asdf.ooo/api/collections/sessions/records"
+        "?page=1"
+        "&perPage=1000"
+        "&skipTotal=1"
+        "&sort=start"
+        f"&filter=is_deleted = false && event_date = '{today}'"
     )
-    return s - timedelta(minutes=5) <= now <= s + timedelta(minutes=40)
 
+    response = requests.get(url, timeout=10)
+    response.raise_for_status()
 
-def collect_measurement(session, percent):
-    MEASUREMENTS.append({
-        "date": datetime.now().date(),
-        "day": session["day"],
-        "start": session["start"],
-        "end": session["end"],
-        "percent": percent,
-        "recorded_at": datetime.now()
-    })
+    items = response.json().get("items", [])
 
+    for item in items:
+        start = item.get("start")
+        end = item.get("end")
+        event_date = item.get("event_date")
+        category_id = item.get("category_external_id")
 
-def prepare_sessions():
+        used = item.get("participants_count", 0)
+        max_p = item.get("max_participants", 0)
+        title = item.get("title") or "Session"
+
+        key = (event_date, start, end, category_id)
+
+        existing = SESSION_STORE.get(key)
+        if existing is None:
+            SESSION_STORE[key] = {
+                "date": event_date,
+                "day": DAYS[datetime.strptime(event_date, "%Y-%m-%d").weekday()],
+                "start": start,
+                "end": end,
+                "used": used,
+                "max": max_p,
+                "title": title,
+            }
+        else:
+            if used > existing["used"]:
+                existing["used"] = used
+
+def prepare_sessions_for_view():
     out = []
-    for s in RAW:
+    for s in SESSION_STORE.values():
         top = time_to_px(s["start"])
         height = time_to_px(s["end"]) - top
 
-        # Employee: anzeigen, aber nie sammeln
-        if s["type"] == "Employee":
-            out.append({
-                "day": s["day"],
-                "top": top,
-                "height": height,
-                "text": "Employee\nnicht buchbar",
-                "color": "#cccccc"
-            })
-            continue
-
-        percent = int(s["used"] / s["max"] * 100)
-
-        # 100 % immer, sonst nur im Zeitfenster
-        if percent == 100 or in_time_window(s["start"]):
-            collect_measurement(s, percent)
-        else:
-            continue
+        percent = 0
+        if s["max"] and s["max"] > 0:
+            percent = int((s["used"] / s["max"]) * 100)
 
         out.append({
             "day": s["day"],
             "top": top,
             "height": height,
-            "text": f"{s['type']}\n{s['used']} / {s['max']} ({percent}%)",
+            "text": f"{s['title']}\n{s['used']} / {s['max']} ({percent}%)",
             "color": heat_color(percent)
         })
-
     return out
 
 HTML = """
-  
-  
-  
-<meta charset="utf-8">  
-<title>Wochenkalender – Auslastung (%)</title>  
-<style>  
-body { font-family: Arial, sans-serif; }  
-.calendar { display:grid; grid-template-columns:80px repeat(5,1fr); }  
-.header { text-align:center; font-weight:bold; padding:6px; }  
-.day { position:relative; height:{{h}}px; border-left:1px solid #ccc; }  
-.session {  
-  position:absolute; left:5px; right:5px;  
-  padding:4px; border-radius:4px;  
-  font-size:11px; white-space:pre-line;  
-}  
-</style>  
-  
-  
-Wochenkalender – Auslastung (%)  
-  
-{% for d in days %}{{d}}{% endfor %}  
-11:00–22:00{% for d in days %}{% endfor %}  
-  
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Wochenkalender – Auslastung (%)</title>
+<style>
+body { font-family: Arial, sans-serif; }
+.calendar { display:grid; grid-template-columns:80px repeat(7,1fr); }
+.header { text-align:center; font-weight:bold; padding:6px; }
+.day { position:relative; height:{{ h }}px; border-left:1px solid #ccc; }
+.session {
+    position:absolute;
+    left:5px;
+    right:5px;
+    padding:4px;
+    border-radius:4px;
+    font-size:11px;
+    white-space:pre-line;
+}
+</style>
+</head>
+<body>
+
+<h2>Wochenkalender – Auslastung (%)</h2>
+
+<div class="calendar">
+    <div></div>
+    {% for d in days %}
+        <div class="header">{{ d }}</div>
+    {% endfor %}
+
+    <div>11:00–22:00</div>
+    {% for d in days %}
+        <div class="day" id="c{{ d }}"></div>
+    {% endfor %}
+</div>
+
 {% for s in sessions %}
-  
-{{s.text}}  
-  
-{% endfor %}  
-<script>  
-document.querySelectorAll(".session").forEach(e=>{  
-  document.getElementById("c"+e.dataset.day).appendChild(e);  
-});  
-</script>  
-  
-  
-"""  
+<div class="session"
+     data-day="{{ s.day }}"
+     style="top:{{ s.top }}px; height:{{ s.height }}px; background:{{ s.color }};">
+{{ s.text }}
+</div>
+{% endfor %}
+
+<script>
+document.querySelectorAll(".session").forEach(el => {
+    const day = el.dataset.day;
+    const col = document.getElementById("c" + day);
+    if (col) col.appendChild(el);
+});
+</script>
+
+</body>
+</html>
+"""
+
 @app.route("/")
 def main():
+    sync_today_sessions()
+    sessions = prepare_sessions_for_view()
     return render_template_string(
         HTML,
         days=DAYS,
-        sessions=prepare_sessions(),
+        sessions=sessions,
         h=time_to_px("22:00")
     )
+
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10000))
     app.run(host="0.0.0.0", port=port)
