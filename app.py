@@ -1,14 +1,24 @@
 import os
-import requests
+import json
 from datetime import datetime
+from urllib.request import urlopen
 from flask import Flask, render_template_string
 
 app = Flask(__name__)
 
-DAYS = ["Montag", "Dienstag", "Mittwoch", "Donnerstag", "Freitag", "Samstag", "Sonntag"]
+# Anzeigeparameter
+DAYS = [
+    "Mittwoch",
+    "Donnerstag",
+    "Freitag",
+    "Samstag",
+    "Sonntag",
+]
 PIXELS_PER_HOUR = 44
 
+# In‑Memory‑Speicher für heutige Sessions (inkrementell)
 SESSION_STORE = {}
+
 
 def heat_color(percent):
     if percent == 100:
@@ -21,9 +31,11 @@ def heat_color(percent):
         return "#ffd43b"
     return "#fff4cc"
 
+
 def time_to_px(hm):
     h, m = map(int, hm.split(":"))
     return ((h - 11) * 60 + m) * PIXELS_PER_HOUR / 60
+
 
 def sync_today_sessions():
     today = datetime.now().strftime("%Y-%m-%d")
@@ -37,49 +49,60 @@ def sync_today_sessions():
         f"&filter=is_deleted = false && event_date = '{today}'"
     )
 
-    response = requests.get(url, timeout=10)
-    response.raise_for_status()
+    with urlopen(url, timeout=10) as response:
+        raw = response.read().decode("utf-8")
+        data = json.loads(raw)
 
-    items = response.json().get("items", [])
+    items = data.get("items", [])
 
     for item in items:
-        key = (
-            item.get("event_date"),
-            item.get("start"),
-            item.get("end"),
-            item.get("category_external_id"),
-        )
+        event_date = item.get("event_date")
+        start = item.get("start")
+        end = item.get("end")
+        category_id = item.get("category_external_id")
+
+        if not event_date or not start or not end or not category_id:
+            continue
 
         used = item.get("participants_count", 0)
         max_p = item.get("max_participants", 0)
 
+        key = (event_date, start, end, category_id)
+
         if key not in SESSION_STORE:
             SESSION_STORE[key] = {
-                "day": DAYS[datetime.strptime(item["event_date"], "%Y-%m-%d").weekday()],
-                "start": item["start"],
-                "end": item["end"],
+                "day": DAYS[datetime.strptime(event_date, "%Y-%m-%d").weekday()],
+                "start": start,
+                "end": end,
                 "used": used,
                 "max": max_p,
-                "title": item.get("title", "Session"),
+                "title": item.get("title", "").strip() or "Session",
             }
         else:
-            SESSION_STORE[key]["used"] = max(SESSION_STORE[key]["used"], used)
+            if used > SESSION_STORE[key]["used"]:
+                SESSION_STORE[key]["used"] = used
+
 
 def prepare_sessions_for_view():
     out = []
+
     for s in SESSION_STORE.values():
         percent = 0
-        if s["max"] > 0:
+        if s["max"] and s["max"] > 0:
             percent = int((s["used"] / s["max"]) * 100)
 
-        out.append({
-            "day": s["day"],
-            "top": time_to_px(s["start"]),
-            "height": time_to_px(s["end"]) - time_to_px(s["start"]),
-            "text": f'{s["title"]}\n{s["used"]} / {s["max"]} ({percent}%)',
-            "color": heat_color(percent),
-        })
+        out.append(
+            {
+                "day": s["day"],
+                "top": time_to_px(s["start"]),
+                "height": time_to_px(s["end"]) - time_to_px(s["start"]),
+                "text": f"{s['title']}\n{s['used']} / {s['max']} ({percent}%)",
+                "color": heat_color(percent),
+            }
+        )
+
     return out
+
 
 HTML = """
 <!doctype html>
@@ -138,6 +161,7 @@ document.querySelectorAll(".session").forEach(el => {
 </html>
 """
 
+
 @app.route("/")
 def main():
     sync_today_sessions()
@@ -146,8 +170,9 @@ def main():
         HTML,
         days=DAYS,
         sessions=sessions,
-        h=time_to_px("22:00")
+        h=time_to_px("22:00"),
     )
+
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10000))
