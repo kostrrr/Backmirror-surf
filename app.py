@@ -1,7 +1,7 @@
 import os
 import json
 import ssl
-from datetime import datetime
+from datetime import datetime, timedelta
 from urllib.request import urlopen, Request
 from urllib.parse import urlencode
 from flask import Flask, render_template_string, request
@@ -23,6 +23,7 @@ DISPLAY_DAYS = ["Mittwoch", "Donnerstag", "Freitag", "Samstag", "Sonntag"]
 PIXELS_PER_HOUR = 44
 SESSION_STORE = {}
 
+
 def heat_color(percent):
     if percent >= 100:
         return "#b00000"
@@ -34,6 +35,7 @@ def heat_color(percent):
         return "#ffd43b"
     return "#fff4cc"
 
+
 def time_to_px(hm):
     try:
         h, m = map(int, hm.split(":"))
@@ -41,15 +43,20 @@ def time_to_px(hm):
     except Exception:
         return 0
 
-def sync_today_sessions():
-    today = datetime.now().strftime("%Y-%m-%d")
+
+def sync_week_sessions():
+    today = datetime.now().date()
+    weekday_index = today.weekday()
+    days_until_sunday = 6 - weekday_index
+    start_date = today.strftime("%Y-%m-%d")
+    end_date = (today + timedelta(days=days_until_sunday)).strftime("%Y-%m-%d")
 
     params = {
         "page": 1,
         "perPage": 1000,
         "skipTotal": 1,
         "sort": "start",
-        "filter": f"is_deleted=false && event_date='{today}'",
+        "filter": f"is_deleted=false && event_date>='{start_date}' && event_date<='{end_date}'",
     }
 
     url = "https://oana.asdf.ooo/api/collections/sessions/records?" + urlencode(params)
@@ -62,13 +69,9 @@ def sync_today_sessions():
                 "Accept": "application/json",
             },
         )
-
         context = ssl.create_default_context()
-
         with urlopen(req, timeout=10, context=context) as response:
-            raw = response.read().decode("utf-8")
-            payload = json.loads(raw)
-
+            payload = json.loads(response.read().decode("utf-8"))
         items = payload.get("items", [])
     except Exception:
         return
@@ -83,8 +86,8 @@ def sync_today_sessions():
             if not event_date or not start or not end or not category_id:
                 continue
 
-            weekday_index = datetime.strptime(event_date, "%Y-%m-%d").weekday()
-            day_name = ALL_WEEKDAYS.get(weekday_index)
+            weekday_idx = datetime.strptime(event_date, "%Y-%m-%d").weekday()
+            day_name = ALL_WEEKDAYS.get(weekday_idx)
 
             if day_name not in DISPLAY_DAYS:
                 continue
@@ -110,6 +113,7 @@ def sync_today_sessions():
         except Exception:
             continue
 
+
 def prepare_sessions_for_view():
     sessions = []
 
@@ -133,6 +137,7 @@ def prepare_sessions_for_view():
         })
 
     return sessions
+
 
 HTML = """
 <!doctype html>
@@ -191,16 +196,18 @@ document.querySelectorAll(".session").forEach(el => {
 </html>
 """
 
+
 @app.route("/", methods=["GET", "HEAD"])
 def main():
     if request.method == "GET":
-        sync_today_sessions()
+        sync_week_sessions()
     return render_template_string(
         HTML,
         days=DISPLAY_DAYS,
         sessions=prepare_sessions_for_view(),
         h=time_to_px("22:00"),
     )
+
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10000))
