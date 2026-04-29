@@ -5,11 +5,9 @@ from flask import Flask, render_template_string
 
 app = Flask(__name__)
 
-# Anzeigeparameter
 DAYS = ["Montag", "Dienstag", "Mittwoch", "Donnerstag", "Freitag", "Samstag", "Sonntag"]
 PIXELS_PER_HOUR = 44
 
-# In‑Memory‑Speicher für heutige Sessions
 SESSION_STORE = {}
 
 def heat_color(percent):
@@ -45,48 +43,41 @@ def sync_today_sessions():
     items = response.json().get("items", [])
 
     for item in items:
-        start = item.get("start")
-        end = item.get("end")
-        event_date = item.get("event_date")
-        category_id = item.get("category_external_id")
+        key = (
+            item.get("event_date"),
+            item.get("start"),
+            item.get("end"),
+            item.get("category_external_id"),
+        )
 
         used = item.get("participants_count", 0)
         max_p = item.get("max_participants", 0)
-        title = item.get("title") or "Session"
 
-        key = (event_date, start, end, category_id)
-
-        existing = SESSION_STORE.get(key)
-        if existing is None:
+        if key not in SESSION_STORE:
             SESSION_STORE[key] = {
-                "date": event_date,
-                "day": DAYS[datetime.strptime(event_date, "%Y-%m-%d").weekday()],
-                "start": start,
-                "end": end,
+                "day": DAYS[datetime.strptime(item["event_date"], "%Y-%m-%d").weekday()],
+                "start": item["start"],
+                "end": item["end"],
                 "used": used,
                 "max": max_p,
-                "title": title,
+                "title": item.get("title", "Session"),
             }
         else:
-            if used > existing["used"]:
-                existing["used"] = used
+            SESSION_STORE[key]["used"] = max(SESSION_STORE[key]["used"], used)
 
 def prepare_sessions_for_view():
     out = []
     for s in SESSION_STORE.values():
-        top = time_to_px(s["start"])
-        height = time_to_px(s["end"]) - top
-
         percent = 0
-        if s["max"] and s["max"] > 0:
+        if s["max"] > 0:
             percent = int((s["used"] / s["max"]) * 100)
 
         out.append({
             "day": s["day"],
-            "top": top,
-            "height": height,
-            "text": f"{s['title']}\n{s['used']} / {s['max']} ({percent}%)",
-            "color": heat_color(percent)
+            "top": time_to_px(s["start"]),
+            "height": time_to_px(s["end"]) - time_to_px(s["start"]),
+            "text": f'{s["title"]}\n{s["used"]} / {s["max"]} ({percent}%)',
+            "color": heat_color(percent),
         })
     return out
 
@@ -138,8 +129,7 @@ body { font-family: Arial, sans-serif; }
 
 <script>
 document.querySelectorAll(".session").forEach(el => {
-    const day = el.dataset.day;
-    const col = document.getElementById("c" + day);
+    const col = document.getElementById("c" + el.dataset.day);
     if (col) col.appendChild(el);
 });
 </script>
