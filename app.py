@@ -2,11 +2,12 @@ import os
 import json
 from datetime import datetime
 from urllib.request import urlopen
+from urllib.parse import urlencode
 from flask import Flask, render_template_string
 
 app = Flask(__name__)
 
-# --- Wochentags-Mapping (Datenlogik) ---
+# --- Wochentags-Mapping ---
 ALL_WEEKDAYS = {
     0: "Montag",
     1: "Dienstag",
@@ -17,12 +18,12 @@ ALL_WEEKDAYS = {
     6: "Sonntag",
 }
 
-# --- Angezeigte Betriebstage (UI) ---
+# Angezeigte Betriebstage
 DISPLAY_DAYS = ["Mittwoch", "Donnerstag", "Freitag", "Samstag", "Sonntag"]
 
 PIXELS_PER_HOUR = 44
 
-# In-Memory-Speicher für heutige Sessions
+# In-memory Store (inkrementell)
 SESSION_STORE = {}
 
 
@@ -46,22 +47,23 @@ def time_to_px(hm):
 def sync_today_sessions():
     today = datetime.now().strftime("%Y-%m-%d")
 
+    params = {
+        "page": 1,
+        "perPage": 1000,
+        "skipTotal": 1,
+        "sort": "start",
+        "filter": f"is_deleted=false && event_date='{today}'",
+    }
+
     url = (
-        "https://oana.asdf.ooo/api/collections/sessions/records"
-        "?page=1"
-        "&perPage=1000"
-        "&skipTotal=1"
-        "&sort=start"
-        f"&filter=is_deleted = false && event_date = '{today}'"
+        "https://oana.asdf.ooo/api/collections/sessions/records?"
+        + urlencode(params)
     )
 
     with urlopen(url, timeout=10) as response:
-        raw = response.read().decode("utf-8")
-        data = json.loads(raw)
+        data = json.loads(response.read().decode("utf-8"))
 
-    items = data.get("items", [])
-
-    for item in items:
+    for item in data.get("items", []):
         event_date = item.get("event_date")
         start = item.get("start")
         end = item.get("end")
@@ -73,7 +75,6 @@ def sync_today_sessions():
         weekday_index = datetime.strptime(event_date, "%Y-%m-%d").weekday()
         day_name = ALL_WEEKDAYS.get(weekday_index)
 
-        # Nur Betriebstage anzeigen
         if day_name not in DISPLAY_DAYS:
             continue
 
@@ -92,8 +93,9 @@ def sync_today_sessions():
                 "title": item.get("title", "").strip() or "Session",
             }
         else:
-            if used > SESSION_STORE[key]["used"]:
-                SESSION_STORE[key]["used"] = used
+            SESSION_STORE[key]["used"] = max(
+                SESSION_STORE[key]["used"], used
+            )
 
 
 def prepare_sessions_for_view():
@@ -101,7 +103,7 @@ def prepare_sessions_for_view():
 
     for s in SESSION_STORE.values():
         percent = 0
-        if s["max"] and s["max"] > 0:
+        if s["max"] > 0:
             percent = int((s["used"] / s["max"]) * 100)
 
         out.append({
@@ -176,11 +178,10 @@ document.querySelectorAll(".session").forEach(el => {
 @app.route("/")
 def main():
     sync_today_sessions()
-    sessions = prepare_sessions_for_view()
     return render_template_string(
         HTML,
         days=DISPLAY_DAYS,
-        sessions=sessions,
+        sessions=prepare_sessions_for_view(),
         h=time_to_px("22:00"),
     )
 
