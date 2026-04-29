@@ -1,13 +1,13 @@
 import os
 import json
+import ssl
 from datetime import datetime
-from urllib.request import urlopen
+from urllib.request import urlopen, Request
 from urllib.parse import urlencode
-from flask import Flask, render_template_string
+from flask import Flask, render_template_string, request
 
 app = Flask(__name__)
 
-# --- Wochentags-Mapping ---
 ALL_WEEKDAYS = {
     0: "Montag",
     1: "Dienstag",
@@ -18,17 +18,13 @@ ALL_WEEKDAYS = {
     6: "Sonntag",
 }
 
-# Angezeigte Betriebstage
 DISPLAY_DAYS = ["Mittwoch", "Donnerstag", "Freitag", "Samstag", "Sonntag"]
 
 PIXELS_PER_HOUR = 44
-
-# In-memory Store (inkrementell)
 SESSION_STORE = {}
 
-
 def heat_color(percent):
-    if percent == 100:
+    if percent >= 100:
         return "#b00000"
     if percent >= 80:
         return "#d9480f"
@@ -38,11 +34,12 @@ def heat_color(percent):
         return "#ffd43b"
     return "#fff4cc"
 
-
 def time_to_px(hm):
-    h, m = map(int, hm.split(":"))
-    return ((h - 11) * 60 + m) * PIXELS_PER_HOUR / 60
-
+    try:
+        h, m = map(int, hm.split(":"))
+        return ((h - 11) * 60 + m) * PIXELS_PER_HOUR / 60
+    except Exception:
+        return 0
 
 def sync_today_sessions():
     today = datetime.now().strftime("%Y-%m-%d")
@@ -55,67 +52,87 @@ def sync_today_sessions():
         "filter": f"is_deleted=false && event_date='{today}'",
     }
 
-    url = (
-        "https://oana.asdf.ooo/api/collections/sessions/records?"
-        + urlencode(params)
-    )
+    url = "https://oana.asdf.ooo/api/collections/sessions/records?" + urlencode(params)
 
-    with urlopen(url, timeout=10) as response:
-        data = json.loads(response.read().decode("utf-8"))
+    try:
+        req = Request(
+            url,
+            headers={
+                "User-Agent": "Mozilla/5.0",
+                "Accept": "application/json",
+            },
+        )
 
-    for item in data.get("items", []):
-        event_date = item.get("event_date")
-        start = item.get("start")
-        end = item.get("end")
-        category_id = item.get("category_external_id")
+        context = ssl.create_default_context()
 
-        if not event_date or not start or not end or not category_id:
+        with urlopen(req, timeout=10, context=context) as response:
+            raw = response.read().decode("utf-8")
+            payload = json.loads(raw)
+
+        items = payload.get("items", [])
+    except Exception:
+        return
+
+    for item in items:
+        try:
+            event_date = item.get("event_date")
+            start = item.get("start")
+            end = item.get("end")
+            category_id = item.get("category_external_id")
+
+            if not event_date or not start or not end or not category_id:
+                continue
+
+            weekday_index = datetime.strptime(event_date, "%Y-%m-%d").weekday()
+            day_name = ALL_WEEKDAYS.get(weekday_index)
+
+            if day_name not in DISPLAY_DAYS:
+                continue
+
+            used = int(item.get("participants_count") or 0)
+            max_p = int(item.get("max_participants") or 0)
+            title = (item.get("title") or "Session").strip()
+
+            key = (event_date, start, end, category_id)
+
+            if key not in SESSION_STORE:
+                SESSION_STORE[key] = {
+                    "day": day_name,
+                    "start": start,
+                    "end": end,
+                    "used": used,
+                    "max": max_p,
+                    "title": title,
+                }
+            else:
+                if used > SESSION_STORE[key]["used"]:
+                    SESSION_STORE[key]["used"] = used
+        except Exception:
             continue
-
-        weekday_index = datetime.strptime(event_date, "%Y-%m-%d").weekday()
-        day_name = ALL_WEEKDAYS.get(weekday_index)
-
-        if day_name not in DISPLAY_DAYS:
-            continue
-
-        used = item.get("participants_count", 0)
-        max_p = item.get("max_participants", 0)
-
-        key = (event_date, start, end, category_id)
-
-        if key not in SESSION_STORE:
-            SESSION_STORE[key] = {
-                "day": day_name,
-                "start": start,
-                "end": end,
-                "used": used,
-                "max": max_p,
-                "title": item.get("title", "").strip() or "Session",
-            }
-        else:
-            SESSION_STORE[key]["used"] = max(
-                SESSION_STORE[key]["used"], used
-            )
-
 
 def prepare_sessions_for_view():
-    out = []
+    sessions = []
 
     for s in SESSION_STORE.values():
-        percent = 0
-        if s["max"] > 0:
-            percent = int((s["used"] / s["max"]) * 100)
+        max_p = s.get("max", 0)
+        used = s.get("used", 0)
 
-        out.append({
+        percent = int((used / max_p) * 100) if max_p > 0 else 0
+
+        top = time_to_px(s["start"])
+        height = time_to_px(s["end"]) - top
+        if height <= 0:
+            height = PIXELS_PER_HOUR
+
+        sessions.append({
             "day": s["day"],
-            "top": time_to_px(s["start"]),
-            "height": time_to_px(s["end"]) - time_to_px(s["start"]),
-            "text": f"{s['title']}\n{s['used']} / {s['max']} ({percent}%)",
+            "top": top,
+            "height": height,
+            "text": f"{s['title']}\n{used} / {max_p} ({percent}%)",
             "color": heat_color(percent),
         })
 
-    return out
-
+    return sessions
 
 HTML = """
 <!doctype html>
@@ -174,17 +191,16 @@ document.querySelectorAll(".session").forEach(el => {
 </html>
 """
 
-
-@app.route("/")
+@app.route("/", methods=["GET", "HEAD"])
 def main():
-    sync_today_sessions()
+    if request.method == "GET":
+        sync_today_sessions()
     return render_template_string(
         HTML,
         days=DISPLAY_DAYS,
         sessions=prepare_sessions_for_view(),
         h=time_to_px("22:00"),
     )
-
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10000))
