@@ -20,11 +20,13 @@ ALL_WEEKDAYS = {
 
 DISPLAY_DAYS = ["Mittwoch", "Donnerstag", "Freitag", "Samstag", "Sonntag"]
 
-PIXELS_PER_HOUR = 44
 BASE_START_HOUR = 10
 BASE_END_HOUR = 22
+PIXELS_PER_HOUR = 44
+TOTAL_HEIGHT = (BASE_END_HOUR - BASE_START_HOUR) * PIXELS_PER_HOUR
 
 SESSION_STORE = {}
+
 
 def heat_color(percent):
     if percent >= 100:
@@ -37,31 +39,37 @@ def heat_color(percent):
         return "#ffd43b"
     return "#fff4cc"
 
+
 def time_to_px(hm):
-    h, m = map(int, hm.split(":"))
-    minutes_from_base = (h - BASE_START_HOUR) * 60 + m
-    if minutes_from_base < 0:
-        minutes_from_base = 0
-    return minutes_from_base * PIXELS_PER_HOUR / 60
+    try:
+        h, m = map(int, hm.split(":"))
+        minutes = (h - BASE_START_HOUR) * 60 + m
+        if minutes < 0:
+            minutes = 0
+        return minutes * PIXELS_PER_HOUR / 60
+    except Exception:
+        return 0
+
 
 def sync_week_sessions():
-    today = datetime.now().date()
-    weekday_index = today.weekday()
-    days_until_sunday = 6 - weekday_index
-    start_date = today.strftime("%Y-%m-%d")
-    end_date = (today + timedelta(days=days_until_sunday)).strftime("%Y-%m-%d")
-
-    params = {
-        "page": 1,
-        "perPage": 1000,
-        "skipTotal": 1,
-        "sort": "start",
-        "filter": f"is_deleted=false && event_date>='{start_date}' && event_date<='{end_date}'",
-    }
-
-    url = "https://oana.asdf.ooo/api/collections/sessions/records?" + urlencode(params)
-
     try:
+        today = datetime.now().date()
+        weekday_index = today.weekday()
+        days_until_sunday = 6 - weekday_index
+
+        start_date = today.strftime("%Y-%m-%d")
+        end_date = (today + timedelta(days=days_until_sunday)).strftime("%Y-%m-%d")
+
+        params = {
+            "page": 1,
+            "perPage": 1000,
+            "skipTotal": 1,
+            "sort": "start",
+            "filter": f"is_deleted=false && event_date>='{start_date}' && event_date<='{end_date}'",
+        }
+
+        url = "https://oana.asdf.ooo/api/collections/sessions/records?" + urlencode(params)
+
         req = Request(
             url,
             headers={
@@ -69,10 +77,12 @@ def sync_week_sessions():
                 "Accept": "application/json",
             },
         )
+
         context = ssl.create_default_context()
         with urlopen(req, timeout=10, context=context) as response:
-            payload = json.loads(response.read().decode("utf-8"))
-        items = payload.get("items", [])
+            data = json.loads(response.read().decode("utf-8"))
+
+        items = data.get("items", [])
     except Exception:
         return
 
@@ -82,8 +92,9 @@ def sync_week_sessions():
             start = item.get("start")
             end = item.get("end")
             category_id = item.get("category_external_id")
+            title = (item.get("title") or "Session").strip()
 
-            if not event_date or not start or not end or not category_id:
+            if not event_date or not start or not end:
                 continue
 
             weekday_idx = datetime.strptime(event_date, "%Y-%m-%d").weekday()
@@ -94,7 +105,6 @@ def sync_week_sessions():
 
             used = int(item.get("participants_count") or 0)
             max_p = int(item.get("max_participants") or 0)
-            title = (item.get("title") or "Session").strip()
 
             key = (event_date, start, end, category_id)
 
@@ -113,30 +123,34 @@ def sync_week_sessions():
         except Exception:
             continue
 
+
 def prepare_sessions_for_view():
-    sessions = []
+    result = []
 
     for s in SESSION_STORE.values():
-        max_p = s.get("max", 0)
-        used = s.get("used", 0)
-        percent = int((used / max_p) * 100) if max_p > 0 else 0
+        try:
+            max_p = s.get("max", 0)
+            used = s.get("used", 0)
+            percent = int((used / max_p) * 100) if max_p > 0 else 0
 
-        top = time_to_px(s["start"])
-        height = time_to_px(s["end"]) - top
-        if height <= 0:
-            height = PIXELS_PER_HOUR
+            top = time_to_px(s["start"])
+            bottom = time_to_px(s["end"])
+            height = bottom - top
+            if height <= 0:
+                height = PIXELS_PER_HOUR
 
-        sessions.append({
-            "day": s["day"],
-            "top": top,
-            "height": height,
-            "text": f"{s['title']}\n{used} / {max_p} ({percent}%)",
-            "color": heat_color(percent),
-        })
+            result.append({
+                "day": s["day"],
+                "top": top,
+                "height": height,
+                "text": f"{s['title']}\n{used} / {max_p} ({percent}%)",
+                "color": heat_color(percent),
+            })
+        except Exception:
+            continue
 
-    return sessions
+    return result
 
-TOTAL_HEIGHT = (BASE_END_HOUR - BASE_START_HOUR) * PIXELS_PER_HOUR
 
 HTML = """
 <!doctype html>
@@ -169,7 +183,6 @@ body { font-family: Arial, sans-serif; }
     {% for d in days %}
         <div class="header">{{ d }}</div>
     {% endfor %}
-
     <div>{{ base_start }}:00–{{ base_end }}:00</div>
     {% for d in days %}
         <div class="day" id="c{{ d }}"></div>
@@ -195,10 +208,15 @@ document.querySelectorAll(".session").forEach(el => {
 </html>
 """
 
+
 @app.route("/", methods=["GET", "HEAD"])
 def main():
     if request.method == "GET":
-        sync_week_sessions()
+        try:
+            sync_week_sessions()
+        except Exception:
+            pass
+
     return render_template_string(
         HTML,
         days=DISPLAY_DAYS,
@@ -207,6 +225,7 @@ def main():
         base_start=BASE_START_HOUR,
         base_end=BASE_END_HOUR,
     )
+
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10000))
