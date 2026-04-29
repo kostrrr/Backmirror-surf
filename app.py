@@ -21,8 +21,10 @@ ALL_WEEKDAYS = {
 DISPLAY_DAYS = ["Mittwoch", "Donnerstag", "Freitag", "Samstag", "Sonntag"]
 
 PIXELS_PER_HOUR = 44
-SESSION_STORE = {}
+BASE_START_HOUR = 10
+BASE_END_HOUR = 22
 
+SESSION_STORE = {}
 
 def heat_color(percent):
     if percent >= 100:
@@ -35,14 +37,12 @@ def heat_color(percent):
         return "#ffd43b"
     return "#fff4cc"
 
-
 def time_to_px(hm):
-    try:
-        h, m = map(int, hm.split(":"))
-        return ((h - 11) * 60 + m) * PIXELS_PER_HOUR / 60
-    except Exception:
-        return 0
-
+    h, m = map(int, hm.split(":"))
+    minutes_from_base = (h - BASE_START_HOUR) * 60 + m
+    if minutes_from_base < 0:
+        minutes_from_base = 0
+    return minutes_from_base * PIXELS_PER_HOUR / 60
 
 def sync_week_sessions():
     today = datetime.now().date()
@@ -113,14 +113,12 @@ def sync_week_sessions():
         except Exception:
             continue
 
-
 def prepare_sessions_for_view():
     sessions = []
 
     for s in SESSION_STORE.values():
         max_p = s.get("max", 0)
         used = s.get("used", 0)
-
         percent = int((used / max_p) * 100) if max_p > 0 else 0
 
         top = time_to_px(s["start"])
@@ -138,6 +136,7 @@ def prepare_sessions_for_view():
 
     return sessions
 
+TOTAL_HEIGHT = (BASE_END_HOUR - BASE_START_HOUR) * PIXELS_PER_HOUR
 
 HTML = """
 <!doctype html>
@@ -171,7 +170,7 @@ body { font-family: Arial, sans-serif; }
         <div class="header">{{ d }}</div>
     {% endfor %}
 
-    <div>11:00–22:00</div>
+    <div>{{ base_start }}:00–{{ base_end }}:00</div>
     {% for d in days %}
         <div class="day" id="c{{ d }}"></div>
     {% endfor %}
@@ -196,7 +195,6 @@ document.querySelectorAll(".session").forEach(el => {
 </html>
 """
 
-
 @app.route("/", methods=["GET", "HEAD"])
 def main():
     if request.method == "GET":
@@ -205,9 +203,10 @@ def main():
         HTML,
         days=DISPLAY_DAYS,
         sessions=prepare_sessions_for_view(),
-        h=time_to_px("22:00"),
+        h=TOTAL_HEIGHT,
+        base_start=BASE_START_HOUR,
+        base_end=BASE_END_HOUR,
     )
-
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10000))
