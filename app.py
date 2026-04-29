@@ -6,17 +6,23 @@ from flask import Flask, render_template_string
 
 app = Flask(__name__)
 
-# Anzeigeparameter
-DAYS = [
-    "Mittwoch",
-    "Donnerstag",
-    "Freitag",
-    "Samstag",
-    "Sonntag",
-]
+# --- Wochentags-Mapping (Datenlogik) ---
+ALL_WEEKDAYS = {
+    0: "Montag",
+    1: "Dienstag",
+    2: "Mittwoch",
+    3: "Donnerstag",
+    4: "Freitag",
+    5: "Samstag",
+    6: "Sonntag",
+}
+
+# --- Angezeigte Betriebstage (UI) ---
+DISPLAY_DAYS = ["Mittwoch", "Donnerstag", "Freitag", "Samstag", "Sonntag"]
+
 PIXELS_PER_HOUR = 44
 
-# In‑Memory‑Speicher für heutige Sessions (inkrementell)
+# In-Memory-Speicher für heutige Sessions
 SESSION_STORE = {}
 
 
@@ -64,6 +70,13 @@ def sync_today_sessions():
         if not event_date or not start or not end or not category_id:
             continue
 
+        weekday_index = datetime.strptime(event_date, "%Y-%m-%d").weekday()
+        day_name = ALL_WEEKDAYS.get(weekday_index)
+
+        # Nur Betriebstage anzeigen
+        if day_name not in DISPLAY_DAYS:
+            continue
+
         used = item.get("participants_count", 0)
         max_p = item.get("max_participants", 0)
 
@@ -71,7 +84,7 @@ def sync_today_sessions():
 
         if key not in SESSION_STORE:
             SESSION_STORE[key] = {
-                "day": DAYS[datetime.strptime(event_date, "%Y-%m-%d").weekday()],
+                "day": day_name,
                 "start": start,
                 "end": end,
                 "used": used,
@@ -91,15 +104,13 @@ def prepare_sessions_for_view():
         if s["max"] and s["max"] > 0:
             percent = int((s["used"] / s["max"]) * 100)
 
-        out.append(
-            {
-                "day": s["day"],
-                "top": time_to_px(s["start"]),
-                "height": time_to_px(s["end"]) - time_to_px(s["start"]),
-                "text": f"{s['title']}\n{s['used']} / {s['max']} ({percent}%)",
-                "color": heat_color(percent),
-            }
-        )
+        out.append({
+            "day": s["day"],
+            "top": time_to_px(s["start"]),
+            "height": time_to_px(s["end"]) - time_to_px(s["start"]),
+            "text": f"{s['title']}\n{s['used']} / {s['max']} ({percent}%)",
+            "color": heat_color(percent),
+        })
 
     return out
 
@@ -112,7 +123,7 @@ HTML = """
 <title>Wochenkalender – Auslastung (%)</title>
 <style>
 body { font-family: Arial, sans-serif; }
-.calendar { display:grid; grid-template-columns:80px repeat(7,1fr); }
+.calendar { display:grid; grid-template-columns:80px repeat(5,1fr); }
 .header { text-align:center; font-weight:bold; padding:6px; }
 .day { position:relative; height:{{ h }}px; border-left:1px solid #ccc; }
 .session {
@@ -168,7 +179,7 @@ def main():
     sessions = prepare_sessions_for_view()
     return render_template_string(
         HTML,
-        days=DAYS,
+        days=DISPLAY_DAYS,
         sessions=sessions,
         h=time_to_px("22:00"),
     )
