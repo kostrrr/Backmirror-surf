@@ -22,10 +22,10 @@ DISPLAY_DAYS = ["Mittwoch", "Donnerstag", "Freitag", "Samstag", "Sonntag"]
 
 BASE_START_HOUR = 10
 BASE_END_HOUR = 22
-PIXELS_PER_HOUR = 44
+PIXELS_PER_HOUR = 60
 TOTAL_HEIGHT = (BASE_END_HOUR - BASE_START_HOUR) * PIXELS_PER_HOUR
 
-SESSION_STORE = {}
+SESSION_STORE = []
 
 
 def heat_color(percent):
@@ -41,115 +41,79 @@ def heat_color(percent):
 
 
 def time_to_px(hm):
-    try:
-        h, m = map(int, hm.split(":"))
-        minutes = (h - BASE_START_HOUR) * 60 + m
-        if minutes < 0:
-            minutes = 0
-        return minutes * PIXELS_PER_HOUR / 60
-    except Exception:
-        return 0
+    h, m = map(int, hm.split(":"))
+    minutes = (h - BASE_START_HOUR) * 60 + m
+    if minutes < 0:
+        minutes = 0
+    return minutes
 
 
 def sync_week_sessions():
-    try:
-        today = datetime.now().date()
-        weekday_index = today.weekday()
-        days_until_sunday = 6 - weekday_index
+    SESSION_STORE.clear()
 
-        start_date = today.strftime("%Y-%m-%d")
-        end_date = (today + timedelta(days=days_until_sunday)).strftime("%Y-%m-%d")
+    today = datetime.now().date()
+    start_date = today
+    end_date = today + timedelta(days=6)
 
-        params = {
-            "page": 1,
-            "perPage": 1000,
-            "skipTotal": 1,
-            "sort": "start",
-            "filter": f"is_deleted=false && event_date>='{start_date}' && event_date<='{end_date}'",
-        }
+    params = {
+        "page": 1,
+        "perPage": 1000,
+        "skipTotal": 1,
+        "sort": "start",
+        "filter": f"is_deleted=false && event_date>='{start_date}' && event_date<='{end_date}'",
+    }
 
-        url = "https://oana.asdf.ooo/api/collections/sessions/records?" + urlencode(params)
+    url = "https://oana.asdf.ooo/api/collections/sessions/records?" + urlencode(params)
 
-        req = Request(
-            url,
-            headers={
-                "User-Agent": "Mozilla/5.0",
-                "Accept": "application/json",
-            },
-        )
+    req = Request(url, headers={"User-Agent": "Mozilla/5.0"})
+    context = ssl.create_default_context()
 
-        context = ssl.create_default_context()
-        with urlopen(req, timeout=10, context=context) as response:
-            data = json.loads(response.read().decode("utf-8"))
+    with urlopen(req, timeout=10, context=context) as response:
+        data = json.loads(response.read().decode("utf-8"))
 
-        items = data.get("items", [])
-    except Exception:
-        return
+    for item in data.get("items", []):
+        event_date = item.get("event_date")
+        start = item.get("start")
+        end = item.get("end")
 
-    for item in items:
-        try:
-            event_date = item.get("event_date")
-            start = item.get("start")
-            end = item.get("end")
-            category_id = item.get("category_external_id")
-            title = (item.get("title") or "Session").strip()
-
-            if not event_date or not start or not end:
-                continue
-
-            weekday_idx = datetime.strptime(event_date, "%Y-%m-%d").weekday()
-            day_name = ALL_WEEKDAYS.get(weekday_idx)
-
-            if day_name not in DISPLAY_DAYS:
-                continue
-
-            used = int(item.get("participants_count") or 0)
-            max_p = int(item.get("max_participants") or 0)
-
-            key = (event_date, start, end, category_id)
-
-            if key not in SESSION_STORE:
-                SESSION_STORE[key] = {
-                    "day": day_name,
-                    "start": start,
-                    "end": end,
-                    "used": used,
-                    "max": max_p,
-                    "title": title,
-                }
-            else:
-                if used > SESSION_STORE[key]["used"]:
-                    SESSION_STORE[key]["used"] = used
-        except Exception:
+        if not event_date or not start or not end:
             continue
 
+        weekday_idx = datetime.strptime(event_date, "%Y-%m-%d").weekday()
+        day_name = ALL_WEEKDAYS.get(weekday_idx)
 
-def prepare_sessions_for_view():
-    result = []
-
-    for s in SESSION_STORE.values():
-        try:
-            max_p = s.get("max", 0)
-            used = s.get("used", 0)
-            percent = int((used / max_p) * 100) if max_p > 0 else 0
-
-            top = time_to_px(s["start"])
-            bottom = time_to_px(s["end"])
-            height = bottom - top
-            if height <= 0:
-                height = PIXELS_PER_HOUR
-
-            result.append({
-                "day": s["day"],
-                "top": top,
-                "height": height,
-                "text": f"{s['title']}\n{used} / {max_p} ({percent}%)",
-                "color": heat_color(percent),
-            })
-        except Exception:
+        if day_name not in DISPLAY_DAYS:
             continue
 
-    return result
+        used = int(item.get("participants_count") or 0)
+        max_p = int(item.get("max_participants") or 0)
+        title = (item.get("title") or "Session").strip()
+
+        top = time_to_px(start)
+        bottom = time_to_px(end)
+        height = max(bottom - top, 30)
+
+        percent = int((used / max_p) * 100) if max_p > 0 else 0
+
+        SESSION_STORE.append({
+            "day": day_name,
+            "top": top,
+            "height": height,
+            "text": f"{title}\n{used} / {max_p} ({percent}%)",
+            "color": heat_color(percent),
+        })
+
+
+def time_slots():
+    slots = []
+    current = BASE_START_HOUR * 60
+    end = BASE_END_HOUR * 60
+    while current <= end:
+        h = current // 60
+        m = current % 60
+        slots.append(f"{h:02d}:{m:02d}")
+        current += 45
+    return slots
 
 
 HTML = """
@@ -162,7 +126,9 @@ HTML = """
 body { font-family: Arial, sans-serif; }
 .calendar { display:grid; grid-template-columns:80px repeat(5,1fr); }
 .header { text-align:center; font-weight:bold; padding:6px; }
-.day { position:relative; height:{{ h }}px; border-left:1px solid #ccc; }
+.times { position:relative; height:{{ total_height }}px; }
+.time { position:absolute; left:0; font-size:11px; }
+.day { position:relative; height:{{ total_height }}px; border-left:1px solid #ccc; }
 .session {
     position:absolute;
     left:5px;
@@ -183,9 +149,15 @@ body { font-family: Arial, sans-serif; }
     {% for d in days %}
         <div class="header">{{ d }}</div>
     {% endfor %}
-    <div>{{ base_start }}:00–{{ base_end }}:00</div>
+
+    <div class="times">
+        {% for t in slots %}
+        <div class="time" style="top:{{ loop.index0 * 45 }}px;">{{ t }}</div>
+        {% endfor %}
+    </div>
+
     {% for d in days %}
-        <div class="day" id="c{{ d }}"></div>
+    <div class="day" id="c{{ d }}"></div>
     {% endfor %}
 </div>
 
@@ -212,18 +184,14 @@ document.querySelectorAll(".session").forEach(el => {
 @app.route("/", methods=["GET", "HEAD"])
 def main():
     if request.method == "GET":
-        try:
-            sync_week_sessions()
-        except Exception:
-            pass
+        sync_week_sessions()
 
     return render_template_string(
         HTML,
         days=DISPLAY_DAYS,
-        sessions=prepare_sessions_for_view(),
-        h=TOTAL_HEIGHT,
-        base_start=BASE_START_HOUR,
-        base_end=BASE_END_HOUR,
+        sessions=SESSION_STORE,
+        slots=time_slots(),
+        total_height=TOTAL_HEIGHT,
     )
 
 
