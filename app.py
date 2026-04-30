@@ -1,10 +1,10 @@
 import os
 import json
 import ssl
-from datetime import datetime
+from datetime import datetime, timedelta, date
 from urllib.request import urlopen, Request
 from urllib.parse import urlencode
-from flask import Flask, render_template_string
+from flask import Flask, render_template_string, request
 
 app = Flask(__name__)
 
@@ -18,7 +18,7 @@ ALL_WEEKDAYS = {
     6: "Sonntag",
 }
 
-PIXELS_PER_MINUTE = 1
+PIXELS_PER_MINUTE = 2  # ✅ größer + lesbar
 
 
 def heat_color(percent: int) -> str:
@@ -38,6 +38,14 @@ def minutes_from_iso(ts: str) -> int:
     return dt.hour * 60 + dt.minute
 
 
+def get_week_bounds(ref: date):
+    """Mittwoch–Sonntag der Referenzwoche"""
+    weekday = ref.weekday()  # Mon=0
+    wed = ref - timedelta(days=(weekday - 2) % 7)
+    sun = wed + timedelta(days=4)
+    return wed, sun
+
+
 def fetch_sessions():
     params = {
         "page": 1,
@@ -49,67 +57,69 @@ def fetch_sessions():
     }
 
     url = "https://oana.asdf.ooo/api/collections/sessions/records?" + urlencode(params)
-    req = Request(
-        url,
-        headers={
-            "User-Agent": "Mozilla/5.0",
-            "Accept": "application/json",
-        },
-    )
-
+    req = Request(url, headers={"User-Agent": "Mozilla/5.0", "Accept": "application/json"})
     context = ssl.create_default_context()
+
     with urlopen(req, timeout=30, context=context) as response:
         data = json.loads(response.read().decode("utf-8"))
 
     return data.get("items", [])
 
 
-def build_calendar():
+def build_week_calendar(week_offset: int):
+    today = date.today()
+    ref_date = today + timedelta(weeks=week_offset)
+    week_start, week_end = get_week_bounds(ref_date)
+
     raw = fetch_sessions()
     days = {}
 
     for item in raw:
-        try:
-            event_date = item["event_date"]
-            start_ts = item["start"]
-            end_ts = item["end"]
-
-            start_min = minutes_from_iso(start_ts)
-            end_min = minutes_from_iso(end_ts)
-            if end_min <= start_min:
-                continue
-
-            date_obj = datetime.strptime(event_date, "%Y-%m-%d").date()
-            weekday_label = ALL_WEEKDAYS[date_obj.weekday()]
-
-            used = int(item.get("participants_count") or 0)
-            max_p = int(item.get("max_participants") or 0)
-            percent = int((used / max_p) * 100) if max_p > 0 else 0
-            title = (item.get("title") or "Session").strip()
-
-            if event_date not in days:
-                days[event_date] = {
-                    "label": f"{weekday_label} {date_obj.strftime('%d.%m')}",
-                    "times": set(),
-                    "sessions": [],
-                }
-
-            days[event_date]["times"].add(start_min)
-            days[event_date]["times"].add(end_min)
-
-            days[event_date]["sessions"].append({
-                "start": start_min,
-                "end": end_min,
-                "text": f"{title}\n{used} / {max_p} ({percent}%)",
-                "color": heat_color(percent),
-            })
-        except Exception:
+        event_date = item.get("event_date")
+        if not event_date:
             continue
+
+        d = datetime.strptime(event_date, "%Y-%m-%d").date()
+        if not (week_start <= d <= week_end):
+            continue
+
+        start_ts = item.get("start")
+        end_ts = item.get("end")
+        if not start_ts or not end_ts:
+            continue
+
+        start_min = minutes_from_iso(start_ts)
+        end_min = minutes_from_iso(end_ts)
+        if end_min <= start_min:
+            continue
+
+        used = int(item.get("participants_count") or 0)
+        max_p = int(item.get("max_participants") or 0)
+        percent = int((used / max_p) * 100) if max_p > 0 else 0
+        title = (item.get("title") or "Session").strip()
+
+        key = d.isoformat()
+        if key not in days:
+            days[key] = {
+                "label": f"{ALL_WEEKDAYS[d.weekday()]} {d.strftime('%d.%m')}",
+                "times": set(),
+                "sessions": [],
+            }
+
+        days[key]["times"].add(start_min)
+        days[key]["times"].add(end_min)
+
+        days[key]["sessions"].append({
+            "start": start_min,
+            "end": end_min,
+            "text": f"{title}\n{used} / {max_p} ({percent}%)",
+            "color": heat_color(percent),
+        })
 
     calendar = []
 
-    for dkey in sorted(days.keys()):
-        d = days[dkey]
+    for key in sorted(days.keys()):
+        d = days[key]
         base = min(d["times"])
         top = max(d["times"])
         height = (top - base) * PIXELS_PER_MINUTE
@@ -139,7 +149,7 @@ def build_calendar():
             "sessions": sessions,
         })
 
-    return calendar
+    return calendar, week_start, week_end
 
 
 HTML = """
@@ -150,25 +160,32 @@ HTML = """
 <title>Wochenkalender – Auslastung (%)</title>
 <style>
 body { font-family: Arial, sans-serif; }
+.nav { margin-bottom: 10px; }
 .days { display: flex; gap: 20px; align-items: flex-start; }
 .day { position: relative; padding-left: 60px; border-left: 1px solid #ccc; }
 .day-title { font-weight: bold; margin-bottom: 6px; }
 .timeline { position: relative; }
 .time { position: absolute; left: -55px; font-size: 11px; }
 .session {
-    position: absolute;
-    left: 0;
-    right: 10px;
-    padding: 4px;
-    border-radius: 4px;
-    font-size: 11px;
-    white-space: pre-line;
+    position:absolute;
+    left:0;
+    right:10px;
+    padding:6px;
+    border-radius:4px;
+    font-size:12px;
+    white-space:pre-line;
 }
 </style>
 </head>
 <body>
 
 <h2>Wochenkalender – Auslastung (%)</h2>
+
+<div class="nav">
+  <a href="/?week_offset={{ week_offset - 1 }}">◀ Vorige Woche</a> |
+  <strong>{{ week_start }} – {{ week_end }}</strong> |
+  <a href="/?week_offset={{ week_offset + 1 }}">Nächste Woche ▶</a>
+</div>
 
 <div class="days">
 {% for d in calendar %}
@@ -196,8 +213,15 @@ body { font-family: Arial, sans-serif; }
 
 @app.route("/")
 def main():
-    calendar = build_calendar()
-    return render_template_string(HTML, calendar=calendar)
+    week_offset = int(request.args.get("week_offset", 0))
+    calendar, ws, we = build_week_calendar(week_offset)
+    return render_template_string(
+        HTML,
+        calendar=calendar,
+        week_start=ws.strftime("%d.%m.%Y"),
+        week_end=we.strftime("%d.%m.%Y"),
+        week_offset=week_offset,
+    )
 
 
 if __name__ == "__main__":
