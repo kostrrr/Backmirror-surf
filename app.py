@@ -67,60 +67,52 @@ def fetch_sessions():
 
 def build_calendar():
     raw = fetch_sessions()
-    if not raw:
-        return []
-
     days = {}
 
     for item in raw:
-        try:
-            event_date = item.get("event_date")
-            start = item.get("start")
-            end = item.get("end")
-            if not event_date or not start or not end:
-                continue
-
-            date_obj = datetime.strptime(event_date, "%Y-%m-%d").date()
-            if date_obj < datetime.now().date():
-                continue
-
-            weekday_label = ALL_WEEKDAYS[date_obj.weekday()]
-            start_min = to_minutes(start)
-            end_min = to_minutes(end)
-            if end_min <= start_min:
-                continue
-
-            used = int(item.get("participants_count") or 0)
-            max_p = int(item.get("max_participants") or 0)
-            percent = int((used / max_p) * 100) if max_p > 0 else 0
-            title = (item.get("title") or "Session").strip()
-
-            if event_date not in days:
-                days[event_date] = {
-                    "label": f"{weekday_label} {date_obj.strftime('%d.%m')}",
-                    "sessions": [],
-                    "times": set(),
-                }
-
-            days[event_date]["times"].add(start_min)
-            days[event_date]["times"].add(end_min)
-
-            days[event_date]["sessions"].append({
-                "start": start_min,
-                "end": end_min,
-                "text": f"{title}\n{used} / {max_p} ({percent}%)",
-                "color": heat_color(percent),
-            })
-        except Exception:
+        event_date = item.get("event_date")
+        start = item.get("start")
+        end = item.get("end")
+        if not event_date or not start or not end:
             continue
+
+        date_obj = datetime.strptime(event_date, "%Y-%m-%d").date()
+        weekday_label = ALL_WEEKDAYS[date_obj.weekday()]
+
+        start_min = to_minutes(start)
+        end_min = to_minutes(end)
+        if end_min <= start_min:
+            continue
+
+        used = int(item.get("participants_count") or 0)
+        max_p = int(item.get("max_participants") or 0)
+        percent = int((used / max_p) * 100) if max_p > 0 else 0
+        title = (item.get("title") or "Session").strip()
+
+        if event_date not in days:
+            days[event_date] = {
+                "label": f"{weekday_label} {date_obj.strftime('%d.%m')}",
+                "sessions": [],
+                "times": set(),
+            }
+
+        days[event_date]["times"].add(start_min)
+        days[event_date]["times"].add(end_min)
+
+        days[event_date]["sessions"].append({
+            "start": start_min,
+            "end": end_min,
+            "text": f"{title}\n{used} / {max_p} ({percent}%)",
+            "color": heat_color(percent),
+        })
 
     calendar = []
 
-    for date_key in sorted(days.keys())[:7]:
+    for date_key in sorted(days.keys()):
         d = days[date_key]
         base = min(d["times"])
-        end = max(d["times"])
-        height = end - base
+        top = max(d["times"])
+        height = top - base
 
         slots = []
         for m in sorted(d["times"]):
