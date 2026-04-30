@@ -1,25 +1,54 @@
 import os
 import json
 import ssl
+from datetime import datetime
 from urllib.request import urlopen, Request
 from urllib.parse import urlencode
 from flask import Flask, render_template_string
 
 app = Flask(__name__)
 
-API_BASE = "https://oana.asdf.ooo/api/collections/sessions/records"
+ALL_WEEKDAYS = {
+    0: "Montag",
+    1: "Dienstag",
+    2: "Mittwoch",
+    3: "Donnerstag",
+    4: "Freitag",
+    5: "Samstag",
+    6: "Sonntag",
+}
 
-def fetch_raw_sessions():
+PIXELS_PER_MINUTE = 1
+
+
+def heat_color(percent: int) -> str:
+    if percent >= 100:
+        return "#b00000"
+    if percent >= 80:
+        return "#d9480f"
+    if percent >= 60:
+        return "#f49300"
+    if percent >= 40:
+        return "#ffd43b"
+    return "#fff4cc"
+
+
+def minutes_from_iso(ts: str) -> int:
+    dt = datetime.fromisoformat(ts)
+    return dt.hour * 60 + dt.minute
+
+
+def fetch_sessions():
     params = {
         "page": 1,
         "perPage": 1000,
         "skipTotal": 1,
         "sort": "event_date,start",
         "filter": "is_deleted=false && source='coremanager' && source_category_id=4",
+        "fields": "event_date,start,end,title,participants_count,max_participants",
     }
 
-    url = API_BASE + "?" + urlencode(params)
-
+    url = "https://oana.asdf.ooo/api/collections/sessions/records?" + urlencode(params)
     req = Request(
         url,
         headers={
@@ -35,41 +64,140 @@ def fetch_raw_sessions():
     return data.get("items", [])
 
 
+def build_calendar():
+    raw = fetch_sessions()
+    days = {}
+
+    for item in raw:
+        try:
+            event_date = item["event_date"]
+            start_ts = item["start"]
+            end_ts = item["end"]
+
+            start_min = minutes_from_iso(start_ts)
+            end_min = minutes_from_iso(end_ts)
+            if end_min <= start_min:
+                continue
+
+            date_obj = datetime.strptime(event_date, "%Y-%m-%d").date()
+            weekday_label = ALL_WEEKDAYS[date_obj.weekday()]
+
+            used = int(item.get("participants_count") or 0)
+            max_p = int(item.get("max_participants") or 0)
+            percent = int((used / max_p) * 100) if max_p > 0 else 0
+            title = (item.get("title") or "Session").strip()
+
+            if event_date not in days:
+                days[event_date] = {
+                    "label": f"{weekday_label} {date_obj.strftime('%d.%m')}",
+                    "times": set(),
+                    "sessions": [],
+                }
+
+            days[event_date]["times"].add(start_min)
+            days[event_date]["times"].add(end_min)
+
+            days[event_date]["sessions"].append({
+                "start": start_min,
+                "end": end_min,
+                "text": f"{title}\n{used} / {max_p} ({percent}%)",
+                "color": heat_color(percent),
+            })
+        except Exception:
+            continue
+
+    calendar = []
+
+    for dkey in sorted(days.keys()):
+        d = days[dkey]
+        base = min(d["times"])
+        top = max(d["times"])
+        height = (top - base) * PIXELS_PER_MINUTE
+
+        slots = []
+        for m in sorted(d["times"]):
+            h = m // 60
+            mm = m % 60
+            slots.append({
+                "label": f"{h:02d}:{mm:02d}",
+                "top": (m - base) * PIXELS_PER_MINUTE,
+            })
+
+        sessions = []
+        for s in d["sessions"]:
+            sessions.append({
+                "top": (s["start"] - base) * PIXELS_PER_MINUTE,
+                "height": (s["end"] - s["start"]) * PIXELS_PER_MINUTE,
+                "text": s["text"],
+                "color": s["color"],
+            })
+
+        calendar.append({
+            "label": d["label"],
+            "height": height,
+            "slots": slots,
+            "sessions": sessions,
+        })
+
+    return calendar
+
+
 HTML = """
 <!doctype html>
 <html>
 <head>
 <meta charset="utf-8">
-<title>DEBUG – Raw Session Dump</title>
+<title>Wochenkalender – Auslastung (%)</title>
 <style>
-body { font-family: monospace; white-space: pre; }
-h2 { font-family: Arial, sans-serif; }
-.entry { margin-bottom: 20px; border-bottom: 1px solid #ccc; padding-bottom: 10px; }
+body { font-family: Arial, sans-serif; }
+.days { display: flex; gap: 20px; align-items: flex-start; }
+.day { position: relative; padding-left: 60px; border-left: 1px solid #ccc; }
+.day-title { font-weight: bold; margin-bottom: 6px; }
+.timeline { position: relative; }
+.time { position: absolute; left: -55px; font-size: 11px; }
+.session {
+    position: absolute;
+    left: 0;
+    right: 10px;
+    padding: 4px;
+    border-radius: 4px;
+    font-size: 11px;
+    white-space: pre-line;
+}
 </style>
 </head>
 <body>
 
-<h2>DEBUG – Sessions vom /sessions-Endpoint</h2>
-<p>Anzahl Sessions: {{ sessions|length }}</p>
+<h2>Wochenkalender – Auslastung (%)</h2>
 
-{% for s in sessions %}
-<div class="entry">
-event_date: {{ s.event_date }}
-start: {{ s.start }}
-end: {{ s.end }}
-title: {{ s.title }}
-participants: {{ s.participants_count }} / {{ s.max_participants }}
-</div>
+<div class="days">
+{% for d in calendar %}
+  <div class="day">
+    <div class="day-title">{{ d.label }}</div>
+    <div class="timeline" style="height: {{ d.height }}px;">
+      {% for t in d.slots %}
+        <div class="time" style="top: {{ t.top }}px;">{{ t.label }}</div>
+      {% endfor %}
+      {% for s in d.sessions %}
+        <div class="session"
+             style="top: {{ s.top }}px; height: {{ s.height }}px; background: {{ s.color }};">
+          {{ s.text }}
+        </div>
+      {% endfor %}
+    </div>
+  </div>
 {% endfor %}
+</div>
 
 </body>
 </html>
 """
 
+
 @app.route("/")
-def debug():
-    sessions = fetch_raw_sessions()
-    return render_template_string(HTML, sessions=sessions)
+def main():
+    calendar = build_calendar()
+    return render_template_string(HTML, calendar=calendar)
 
 
 if __name__ == "__main__":
