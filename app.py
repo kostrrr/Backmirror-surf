@@ -21,7 +21,7 @@ ALL_WEEKDAYS = {
 PIXELS_PER_MINUTE = 2
 
 
-def heat_color(percent: int) -> str:
+def heat_color(percent):
     if percent >= 100:
         return "#b00000"
     if percent >= 80:
@@ -33,7 +33,7 @@ def heat_color(percent: int) -> str:
     return "#fff4cc"
 
 
-def minutes_from_iso(ts: str) -> int:
+def minutes_from_iso(ts):
     dt = datetime.fromisoformat(ts)
     return dt.hour * 60 + dt.minute
 
@@ -45,7 +45,7 @@ def fetch_sessions():
         "skipTotal": 1,
         "sort": "event_date,start",
         "filter": "is_deleted=false && source='coremanager' && source_category_id=4",
-        "fields": "event_date,start,end,participants_count,max_participants",
+        "fields": "event_date,start,end,participants_count,max_participants,title",
     }
 
     url = "https://oana.asdf.ooo/api/collections/sessions/records?" + urlencode(params)
@@ -56,48 +56,109 @@ def fetch_sessions():
         return json.loads(r.read().decode("utf-8")).get("items", [])
 
 
-# ---------- MONATS-HEATMAP ----------
-def build_month_heatmap(year: int, month: int):
-    sessions = fetch_sessions()
+def get_week_bounds(ref):
+    wd = ref.weekday()
+    wed = ref - timedelta(days=(wd - 2) % 7)
+    sun = wed + timedelta(days=4)
+    return wed, sun
+
+
+# ---------- WEEK VIEW ----------
+def build_week_calendar(week_offset):
+    today = date.today() + timedelta(weeks=week_offset)
+    ws, we = get_week_bounds(today)
+
+    days = {}
+    for s in fetch_sessions():
+        d = datetime.strptime(s["event_date"], "%Y-%m-%d").date()
+        if not (ws <= d <= we):
+            continue
+
+        sm = minutes_from_iso(s["start"])
+        em = minutes_from_iso(s["end"])
+        if em <= sm:
+            continue
+
+        used = int(s.get("participants_count") or 0)
+        maxp = int(s.get("max_participants") or 0)
+        percent = int((used / maxp) * 100) if maxp > 0 else 0
+
+        key = d.isoformat()
+        if key not in days:
+            days[key] = {
+                "label": f"{ALL_WEEKDAYS[d.weekday()]} {d.strftime('%d.%m')}",
+                "times": set(),
+                "sessions": [],
+            }
+
+        days[key]["times"].update([sm, em])
+        days[key]["sessions"].append({
+            "start": sm,
+            "end": em,
+            "text": f"{s.get('title','Session')}\n{used} / {maxp} ({percent}%)",
+            "color": heat_color(percent),
+        })
+
+    calendar = []
+    for k in sorted(days):
+        d = days[k]
+        base = min(d["times"])
+        top = max(d["times"])
+        height = (top - base) * PIXELS_PER_MINUTE
+
+        slots = [{
+            "label": f"{m//60:02d}:{m%60:02d}",
+            "top": (m - base) * PIXELS_PER_MINUTE
+        } for m in sorted(d["times"])]
+
+        sessions = [{
+            "top": (s["start"] - base) * PIXELS_PER_MINUTE,
+            "height": (s["end"] - s["start"]) * PIXELS_PER_MINUTE,
+            "text": s["text"],
+            "color": s["color"],
+        } for s in d["sessions"]]
+
+        calendar.append({
+            "label": d["label"],
+            "height": height,
+            "slots": slots,
+            "sessions": sessions,
+        })
+
+    return calendar, ws, we
+
+
+# ---------- MONTH HEATMAP ----------
+def build_month_heatmap(year, month):
     slots = {}
 
-    for s in sessions:
+    for s in fetch_sessions():
         d = datetime.strptime(s["event_date"], "%Y-%m-%d").date()
         if d.year != year or d.month != month:
             continue
 
-        start = minutes_from_iso(s["start"])
-        end = minutes_from_iso(s["end"])
+        sm = minutes_from_iso(s["start"])
         used = int(s.get("participants_count") or 0)
-        max_p = int(s.get("max_participants") or 0)
-        if max_p == 0:
+        maxp = int(s.get("max_participants") or 0)
+        if maxp == 0:
             continue
 
-        percent = int((used / max_p) * 100)
+        percent = int((used / maxp) * 100)
+        slot = (sm // 45) * 45
+        slots[slot] = max(slots.get(slot, 0), percent)
 
-        m = (start // 45) * 45  # 45‑Minuten‑Raster
-        key = m
-        slots[key] = max(slots.get(key, 0), percent)
+    base = min(slots) if slots else 0
+    height = (max(slots) + 45 - base) * PIXELS_PER_MINUTE if slots else 0
 
-    if not slots:
-        return [], 0
+    blocks = [{
+        "label": f"{m//60:02d}:{m%60:02d}",
+        "top": (m - base) * PIXELS_PER_MINUTE,
+        "height": 45 * PIXELS_PER_MINUTE,
+        "percent": slots[m],
+        "color": heat_color(slots[m]),
+    } for m in sorted(slots)]
 
-    base = min(slots.keys())
-    top = max(slots.keys()) + 45
-
-    heatmap = []
-    for m in sorted(slots.keys()):
-        h, mm = divmod(m, 60)
-        heatmap.append({
-            "label": f"{h:02d}:{mm:02d}",
-            "top": (m - base) * PIXELS_PER_MINUTE,
-            "height": 45 * PIXELS_PER_MINUTE,
-            "percent": slots[m],
-            "color": heat_color(slots[m]),
-        })
-
-    total_height = (top - base) * PIXELS_PER_MINUTE
-    return heatmap, total_height
+    return blocks, height
 
 
 HTML = """
@@ -109,12 +170,10 @@ HTML = """
 <style>
 body{font-family:Arial;}
 .nav{margin-bottom:10px;}
-.column{position:relative;padding-left:60px;min-width:360px;}
+.days{display:flex;gap:24px;}
+.day{min-width:320px;padding-left:60px;border-left:1px solid #ccc;position:relative;}
 .time{position:absolute;left:-55px;font-size:11px;}
-.block{
- position:absolute;left:0;right:10px;
- padding:8px;border-radius:4px;font-size:12px;
-}
+.session,.block{position:absolute;left:0;right:10px;padding:8px;border-radius:4px;}
 </style>
 </head>
 <body>
@@ -126,20 +185,34 @@ body{font-family:Arial;}
 <a href="/?view=month">Monat (Heatmap)</a>
 </div>
 
-<div class="column" style="height:{{ height }}px;">
-{% for b in blocks %}
-  <div class="time" style="top:{{ b.top }}px">{{ b.label }}</div>
-  <div class="block"
-       style="top:{{ b.top }}px;height:{{ b.height }}px;background:{{ b.color }}">
-    {{ b.percent }}%
-  </div>
+{% if view == "week" %}
+<div class="days">
+{% for d in calendar %}
+<div class="day">
+<b>{{ d.label }}</b>
+<div style="height:{{ d.height }}px;position:relative;">
+{% for t in d.slots %}<div class="time" style="top:{{t.top}}px">{{t.label}}</div>{% endfor %}
+{% for s in d.sessions %}
+<div class="session" style="top:{{s.top}}px;height:{{s.height}}px;background:{{s.color}}">{{s.text}}</div>
 {% endfor %}
 </div>
+</div>
+{% endfor %}
+</div>
+{% else %}
+<div class="day">
+<div style="height:{{ height }}px;position:relative;">
+{% for b in blocks %}
+<div class="time" style="top:{{b.top}}px">{{b.label}}</div>
+<div class="block" style="top:{{b.top}}px;height:{{b.height}}px;background:{{b.color}}">{{b.percent}}%</div>
+{% endfor %}
+</div>
+</div>
+{% endif %}
 
 </body>
 </html>
 """
-
 
 @app.route("/")
 def main():
@@ -149,13 +222,18 @@ def main():
         today = date.today()
         blocks, height = build_month_heatmap(today.year, today.month)
         return render_template_string(
-            HTML,
+            HTML, view="month",
             title=f"Monats‑Heatmap {today.strftime('%m.%Y')}",
-            blocks=blocks,
-            height=height,
+            blocks=blocks, height=height
         )
 
-    return "Wochenansicht bleibt unverändert – nutze ?view=month"
+    week_offset = int(request.args.get("week_offset", 0))
+    calendar, ws, we = build_week_calendar(week_offset)
+    return render_template_string(
+        HTML, view="week",
+        title=f"Woche {ws.strftime('%d.%m')} – {we.strftime('%d.%m')}",
+        calendar=calendar
+    )
 
 
 if __name__ == "__main__":
