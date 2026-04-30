@@ -21,19 +21,19 @@ ALL_WEEKDAYS = {
 PIXELS_PER_MINUTE = 2
 
 
-def heat_color(percent):
-    if percent >= 100:
+def heat_color(percent: int) -> str:
+    if percent >= 90:
         return "#b00000"
-    if percent >= 80:
+    if percent >= 70:
         return "#d9480f"
-    if percent >= 60:
+    if percent >= 50:
         return "#f49300"
-    if percent >= 40:
+    if percent >= 30:
         return "#ffd43b"
     return "#fff4cc"
 
 
-def minutes_from_iso(ts):
+def minutes_from_iso(ts: str) -> int:
     dt = datetime.fromisoformat(ts)
     return dt.hour * 60 + dt.minute
 
@@ -45,7 +45,7 @@ def fetch_sessions():
         "skipTotal": 1,
         "sort": "event_date,start",
         "filter": "is_deleted=false && source='coremanager' && source_category_id=4",
-        "fields": "event_date,start,end,participants_count,max_participants,title",
+        "fields": "event_date,start,end,title,participants_count,max_participants",
     }
 
     url = "https://oana.asdf.ooo/api/collections/sessions/records?" + urlencode(params)
@@ -63,10 +63,10 @@ def get_week_bounds(ref):
     return wed, sun
 
 
-# ---------- WEEK VIEW ----------
+# ---------------- WEEK VIEW ----------------
 def build_week_calendar(week_offset):
-    today = date.today() + timedelta(weeks=week_offset)
-    ws, we = get_week_bounds(today)
+    ref = date.today() + timedelta(weeks=week_offset)
+    ws, we = get_week_bounds(ref)
 
     days = {}
     for s in fetch_sessions():
@@ -95,7 +95,7 @@ def build_week_calendar(week_offset):
         days[key]["sessions"].append({
             "start": sm,
             "end": em,
-            "text": f"{s.get('title','Session')}\n{used} / {maxp} ({percent}%)",
+            "text": f"{s['title']}\n{used}/{maxp} ({percent}%)",
             "color": heat_color(percent),
         })
 
@@ -128,8 +128,8 @@ def build_week_calendar(week_offset):
     return calendar, ws, we
 
 
-# ---------- MONTH HEATMAP ----------
-def build_month_heatmap(year, month):
+# ---------------- MONTH AVERAGE VIEW ----------------
+def build_month_average(year, month):
     slots = {}
 
     for s in fetch_sessions():
@@ -137,28 +137,45 @@ def build_month_heatmap(year, month):
         if d.year != year or d.month != month:
             continue
 
+        weekday = d.weekday()
         sm = minutes_from_iso(s["start"])
+        em = minutes_from_iso(s["end"])
+        title = s["title"]
+
         used = int(s.get("participants_count") or 0)
         maxp = int(s.get("max_participants") or 0)
         if maxp == 0:
             continue
 
-        percent = int((used / maxp) * 100)
-        slot = (sm // 45) * 45
-        slots[slot] = max(slots.get(slot, 0), percent)
+        percent = (used / maxp) * 100
 
-    base = min(slots) if slots else 0
-    height = (max(slots) + 45 - base) * PIXELS_PER_MINUTE if slots else 0
+        key = (weekday, sm, em, title)
 
-    blocks = [{
-        "label": f"{m//60:02d}:{m%60:02d}",
-        "top": (m - base) * PIXELS_PER_MINUTE,
-        "height": 45 * PIXELS_PER_MINUTE,
-        "percent": slots[m],
-        "color": heat_color(slots[m]),
-    } for m in sorted(slots)]
+        if key not in slots:
+            slots[key] = {
+                "values": [],
+                "weekday": weekday,
+                "start": sm,
+                "end": em,
+                "title": title,
+            }
 
-    return blocks, height
+        slots[key]["values"].append(percent)
+
+    rows = []
+    for s in slots.values():
+        avg = sum(s["values"]) / len(s["values"])
+        rows.append({
+            "weekday": ALL_WEEKDAYS[s["weekday"]],
+            "start": f"{s['start']//60:02d}:{s['start']%60:02d}",
+            "end": f"{s['end']//60:02d}:{s['end']%60:02d}",
+            "title": s["title"],
+            "avg": round(avg),
+            "color": heat_color(int(avg)),
+        })
+
+    rows.sort(key=lambda r: (list(ALL_WEEKDAYS.values()).index(r["weekday"]), r["start"]))
+    return rows
 
 
 HTML = """
@@ -169,11 +186,14 @@ HTML = """
 <title>Auslastung</title>
 <style>
 body{font-family:Arial;}
-.nav{margin-bottom:10px;}
+.nav{margin-bottom:12px;}
 .days{display:flex;gap:24px;}
 .day{min-width:320px;padding-left:60px;border-left:1px solid #ccc;position:relative;}
 .time{position:absolute;left:-55px;font-size:11px;}
-.session,.block{position:absolute;left:0;right:10px;padding:8px;border-radius:4px;}
+.session{position:absolute;left:0;right:10px;padding:8px;border-radius:4px;}
+table{border-collapse:collapse;width:100%;}
+th,td{padding:6px;border-bottom:1px solid #ddd;text-align:left;}
+.badge{padding:4px 8px;border-radius:4px;color:#000;}
 </style>
 </head>
 <body>
@@ -182,7 +202,7 @@ body{font-family:Arial;}
 
 <div class="nav">
 <a href="/?view=week">Woche</a> |
-<a href="/?view=month">Monat (Heatmap)</a>
+<a href="/?view=month">Monat (Ø‑Auslastung)</a>
 </div>
 
 {% if view == "week" %}
@@ -199,20 +219,30 @@ body{font-family:Arial;}
 </div>
 {% endfor %}
 </div>
+
 {% else %}
-<div class="day">
-<div style="height:{{ height }}px;position:relative;">
-{% for b in blocks %}
-<div class="time" style="top:{{b.top}}px">{{b.label}}</div>
-<div class="block" style="top:{{b.top}}px;height:{{b.height}}px;background:{{b.color}}">{{b.percent}}%</div>
+<table>
+<tr>
+<th>Wochentag</th>
+<th>Zeit</th>
+<th>Session</th>
+<th>Ø Auslastung</th>
+</tr>
+{% for r in rows %}
+<tr>
+<td>{{ r.weekday }}</td>
+<td>{{ r.start }}–{{ r.end }}</td>
+<td>{{ r.title }}</td>
+<td><span class="badge" style="background:{{ r.color }}">{{ r.avg }}%</span></td>
+</tr>
 {% endfor %}
-</div>
-</div>
+</table>
 {% endif %}
 
 </body>
 </html>
 """
+
 
 @app.route("/")
 def main():
@@ -220,19 +250,21 @@ def main():
 
     if view == "month":
         today = date.today()
-        blocks, height = build_month_heatmap(today.year, today.month)
+        rows = build_month_average(today.year, today.month)
         return render_template_string(
-            HTML, view="month",
-            title=f"Monats‑Heatmap {today.strftime('%m.%Y')}",
-            blocks=blocks, height=height
+            HTML,
+            view="month",
+            title=f"Monats‑Durchschnitt {today.strftime('%m.%Y')}",
+            rows=rows,
         )
 
     week_offset = int(request.args.get("week_offset", 0))
     calendar, ws, we = build_week_calendar(week_offset)
     return render_template_string(
-        HTML, view="week",
+        HTML,
+        view="week",
         title=f"Woche {ws.strftime('%d.%m')} – {we.strftime('%d.%m')}",
-        calendar=calendar
+        calendar=calendar,
     )
 
 
