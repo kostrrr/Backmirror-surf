@@ -40,15 +40,24 @@ def to_minutes(hm):
 
 def fetch_sessions():
     today = datetime.now().date()
-    start_date = (today - timedelta(days=14)).strftime("%Y-%m-%d")
-    end_date = (today + timedelta(days=21)).strftime("%Y-%m-%d")
+    start_date = (today - timedelta(days=7)).strftime("%Y-%m-%d")
+    end_date = (today + timedelta(days=14)).strftime("%Y-%m-%d")
 
     params = {
         "page": 1,
         "perPage": 1000,
         "skipTotal": 1,
         "sort": "event_date,start",
-        "filter": f"is_deleted=false && event_date>='{start_date}' && event_date<='{end_date}'",
+        "filter": (
+            "is_deleted=false && "
+            "source='coremanager' && "
+            "source_category_id=4 && "
+            f"event_date>='{start_date}' && event_date<='{end_date}'"
+        ),
+        "fields": (
+            "event_date,start,end,title,"
+            "participants_count,max_participants"
+        ),
     }
 
     url = "https://oana.asdf.ooo/api/collections/sessions/records?" + urlencode(params)
@@ -62,7 +71,7 @@ def fetch_sessions():
     )
 
     context = ssl.create_default_context()
-    with urlopen(req, timeout=20, context=context) as response:
+    with urlopen(req, timeout=30, context=context) as response:
         payload = json.loads(response.read().decode("utf-8"))
 
     return payload.get("items", [])
@@ -70,9 +79,6 @@ def fetch_sessions():
 
 def build_calendar():
     raw = fetch_sessions()
-    if not raw:
-        return []
-
     days = {}
 
     for item in raw:
