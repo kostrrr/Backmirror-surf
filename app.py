@@ -8,7 +8,6 @@ from flask import Flask, render_template_string, request
 
 app = Flask(__name__)
 
-# ---------- CONFIG ----------
 ALL_WEEKDAYS = {
     0: "Montag",
     1: "Dienstag",
@@ -20,11 +19,13 @@ ALL_WEEKDAYS = {
 }
 
 DISPLAY_DAYS = ["Mittwoch", "Donnerstag", "Freitag", "Samstag", "Sonntag"]
-PIXELS_PER_MINUTE = 1
-SESSION_STORE = []
-TIME_POINTS = set()
 
-# ---------- UTIL ----------
+PIXELS_PER_MINUTE = 1
+
+SESSION_ITEMS = []
+TIME_POINTS = []
+
+
 def heat_color(percent):
     if percent >= 100:
         return "#b00000"
@@ -42,51 +43,82 @@ def to_minutes(hm):
     return h * 60 + m
 
 
-# ---------- DATA ----------
-def sync_wed_to_sun():
-    SESSION_STORE.clear()
-    TIME_POINTS.clear()
-
+def fetch_sessions_wide_range():
     today = datetime.now().date()
-    weekday = today.weekday()
-
-    # Mittwoch der aktuellen Woche
-    delta_to_wed = (weekday - 2) % 7
-    start_date = today - timedelta(days=delta_to_wed)
-    end_date = start_date + timedelta(days=4)
+    start_date = (today - timedelta(days=14)).strftime("%Y-%m-%d")
+    end_date = (today + timedelta(days=21)).strftime("%Y-%m-%d")
 
     params = {
         "page": 1,
         "perPage": 1000,
         "skipTotal": 1,
-        "sort": "start",
+        "sort": "event_date,start",
         "filter": f"is_deleted=false && event_date>='{start_date}' && event_date<='{end_date}'",
     }
 
     url = "https://oana.asdf.ooo/api/collections/sessions/records?" + urlencode(params)
 
-    req = Request(url, headers={"User-Agent": "Mozilla/5.0", "Accept": "application/json"})
+    req = Request(
+        url,
+        headers={
+            "User-Agent": "Mozilla/5.0",
+            "Accept": "application/json",
+        },
+    )
+
     context = ssl.create_default_context()
+    with urlopen(req, timeout=20, context=context) as response:
+        payload = json.loads(response.read().decode("utf-8"))
 
-    with urlopen(req, timeout=15, context=context) as response:
-        data = json.loads(response.read().decode("utf-8"))
+    return payload.get("items", [])
 
-    for item in data.get("items", []):
+
+def determine_week_from_data(items):
+    dates = sorted(
+        {
+            datetime.strptime(item["event_date"], "%Y-%m-%d").date()
+            for item in items
+            if item.get("event_date")
+        }
+    )
+    if not dates:
+        return None, None
+
+    first_date = dates[0]
+    weekday = first_date.weekday()
+    delta_to_wed = (weekday - 2) % 7
+    week_wed = first_date - timedelta(days=delta_to_wed)
+    week_sun = week_wed + timedelta(days=4)
+
+    return week_wed, week_sun
+
+
+def build_view_data():
+    SESSION_ITEMS.clear()
+    TIME_POINTS.clear()
+
+    raw_items = fetch_sessions_wide_range()
+    if not raw_items:
+        return 0, 0
+
+    week_start, week_end = determine_week_from_data(raw_items)
+    if not week_start:
+        return 0, 0
+
+    for item in raw_items:
         try:
-            event_date = item.get("event_date")
-            start = item.get("start")
-            end = item.get("end")
-            title = (item.get("title") or "Session").strip()
-            used = int(item.get("participants_count") or 0)
-            max_p = int(item.get("max_participants") or 0)
-
-            if not event_date or not start or not end:
+            event_date = datetime.strptime(item["event_date"], "%Y-%m-%d").date()
+            if not (week_start <= event_date <= week_end):
                 continue
 
-            weekday_idx = datetime.strptime(event_date, "%Y-%m-%d").weekday()
+            weekday_idx = event_date.weekday()
             day_name = ALL_WEEKDAYS.get(weekday_idx)
-
             if day_name not in DISPLAY_DAYS:
+                continue
+
+            start = item.get("start")
+            end = item.get("end")
+            if not start or not end:
                 continue
 
             start_min = to_minutes(start)
@@ -94,12 +126,15 @@ def sync_wed_to_sun():
             if end_min <= start_min:
                 continue
 
-            TIME_POINTS.add(start_min)
-            TIME_POINTS.add(end_min)
-
+            used = int(item.get("participants_count") or 0)
+            max_p = int(item.get("max_participants") or 0)
             percent = int((used / max_p) * 100) if max_p > 0 else 0
+            title = (item.get("title") or "Session").strip()
 
-            SESSION_STORE.append({
+            TIME_POINTS.append(start_min)
+            TIME_POINTS.append(end_min)
+
+            SESSION_ITEMS.append({
                 "day": day_name,
                 "start_min": start_min,
                 "end_min": end_min,
@@ -109,32 +144,28 @@ def sync_wed_to_sun():
         except Exception:
             continue
 
-
-def build_time_axis():
     if not TIME_POINTS:
-        return [], 0, 0
+        return 0, 0
 
-    sorted_points = sorted(TIME_POINTS)
-    base = sorted_points[0]
-    end = sorted_points[-1]
+    base_time = min(TIME_POINTS)
+    total_height = max(TIME_POINTS) - base_time
+    return base_time, total_height
 
+
+def build_time_labels(base_time):
     labels = []
-    last = None
-    for m in sorted_points:
-        if last is None or m - last >= 30:
-            h = m // 60
-            mm = m % 60
-            labels.append({
-                "label": f"{h:02d}:{mm:02d}",
-                "top": m - base,
-            })
-            last = m
-
-    height = end - base
-    return labels, base, height
+    for m in sorted(set(TIME_POINTS)):
+        if m < base_time:
+            continue
+        h = m // 60
+        mm = m % 60
+        labels.append({
+            "label": f"{h:02d}:{mm:02d}",
+            "top": (m - base_time) * PIXELS_PER_MINUTE,
+        })
+    return labels
 
 
-# ---------- HTML ----------
 HTML = """
 <!doctype html>
 <html>
@@ -199,8 +230,8 @@ body { font-family: Arial, sans-serif; }
 <div class="session"
      data-day="{{ s.day }}"
      style="
-        top: {{ s.start_min - base_time }}px;
-        height: {{ s.end_min - s.start_min }}px;
+        top: {{ (s.start_min - base_time) }}px;
+        height: {{ (s.end_min - s.start_min) }}px;
         background: {{ s.color }};
      ">
 {{ s.text }}
@@ -218,18 +249,20 @@ document.querySelectorAll(".session").forEach(el => {
 </html>
 """
 
-# ---------- ROUTE ----------
+
 @app.route("/", methods=["GET", "HEAD"])
 def main():
     if request.method == "GET":
-        sync_wed_to_sun()
+        base_time, height = build_view_data()
+    else:
+        base_time, height = 0, 0
 
-    times, base_time, height = build_time_axis()
+    times = build_time_labels(base_time)
 
     return render_template_string(
         HTML,
         days=DISPLAY_DAYS,
-        sessions=SESSION_STORE,
+        sessions=SESSION_ITEMS,
         times=times,
         base_time=base_time,
         height=height,
