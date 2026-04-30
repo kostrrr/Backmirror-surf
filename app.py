@@ -8,6 +8,7 @@ from flask import Flask, render_template_string, request
 
 app = Flask(__name__)
 
+# ---------- CONFIG ----------
 ALL_WEEKDAYS = {
     0: "Montag",
     1: "Dienstag",
@@ -19,15 +20,11 @@ ALL_WEEKDAYS = {
 }
 
 DISPLAY_DAYS = ["Mittwoch", "Donnerstag", "Freitag", "Samstag", "Sonntag"]
-
-BASE_START_HOUR = 10
-BASE_END_HOUR = 22
-PIXELS_PER_HOUR = 45
-TOTAL_HEIGHT = (BASE_END_HOUR - BASE_START_HOUR) * PIXELS_PER_HOUR
-
+PIXELS_PER_MINUTE = 1
 SESSION_STORE = []
+TIME_POINTS = set()
 
-
+# ---------- UTIL ----------
 def heat_color(percent):
     if percent >= 100:
         return "#b00000"
@@ -40,65 +37,41 @@ def heat_color(percent):
     return "#fff4cc"
 
 
-def time_to_px(hm):
-    try:
-        h, m = map(int, hm.split(":"))
-        minutes = (h - BASE_START_HOUR) * 60 + m
-        if minutes < 0:
-            minutes = 0
-        return minutes * PIXELS_PER_HOUR / 60
-    except Exception:
-        return 0
+def to_minutes(hm):
+    h, m = map(int, hm.split(":"))
+    return h * 60 + m
 
 
-def build_time_slots():
-    slots = []
-    current = BASE_START_HOUR * 60
-    end = BASE_END_HOUR * 60
-    while current <= end:
-        h = current // 60
-        m = current % 60
-        slots.append({"label": f"{h:02d}:{m:02d}", "top": (current - BASE_START_HOUR * 60) * PIXELS_PER_HOUR / 60})
-        current += 45
-    return slots
+# ---------- DATA ----------
+def sync_wed_to_sun():
+    SESSION_STORE.clear()
+    TIME_POINTS.clear()
 
+    today = datetime.now().date()
+    weekday = today.weekday()
 
-def sync_week_sessions():
-    try:
-        SESSION_STORE.clear()
+    # Mittwoch der aktuellen Woche
+    delta_to_wed = (weekday - 2) % 7
+    start_date = today - timedelta(days=delta_to_wed)
+    end_date = start_date + timedelta(days=4)
 
-        today = datetime.now().date()
-        weekday_index = today.weekday()
-        start_date = today.strftime("%Y-%m-%d")
-        end_date = (today + timedelta(days=6 - weekday_index)).strftime("%Y-%m-%d")
+    params = {
+        "page": 1,
+        "perPage": 1000,
+        "skipTotal": 1,
+        "sort": "start",
+        "filter": f"is_deleted=false && event_date>='{start_date}' && event_date<='{end_date}'",
+    }
 
-        params = {
-            "page": 1,
-            "perPage": 1000,
-            "skipTotal": 1,
-            "sort": "start",
-            "filter": f"is_deleted=false && event_date>='{start_date}' && event_date<='{end_date}'",
-        }
+    url = "https://oana.asdf.ooo/api/collections/sessions/records?" + urlencode(params)
 
-        url = "https://oana.asdf.ooo/api/collections/sessions/records?" + urlencode(params)
+    req = Request(url, headers={"User-Agent": "Mozilla/5.0", "Accept": "application/json"})
+    context = ssl.create_default_context()
 
-        req = Request(
-            url,
-            headers={
-                "User-Agent": "Mozilla/5.0",
-                "Accept": "application/json",
-            },
-        )
+    with urlopen(req, timeout=15, context=context) as response:
+        data = json.loads(response.read().decode("utf-8"))
 
-        context = ssl.create_default_context()
-        with urlopen(req, timeout=10, context=context) as response:
-            payload = json.loads(response.read().decode("utf-8"))
-
-        items = payload.get("items", [])
-    except Exception:
-        return
-
-    for item in items:
+    for item in data.get("items", []):
         try:
             event_date = item.get("event_date")
             start = item.get("start")
@@ -116,18 +89,20 @@ def sync_week_sessions():
             if day_name not in DISPLAY_DAYS:
                 continue
 
-            top = time_to_px(start)
-            bottom = time_to_px(end)
-            height = bottom - top
-            if height <= 0:
-                height = PIXELS_PER_HOUR
+            start_min = to_minutes(start)
+            end_min = to_minutes(end)
+            if end_min <= start_min:
+                continue
+
+            TIME_POINTS.add(start_min)
+            TIME_POINTS.add(end_min)
 
             percent = int((used / max_p) * 100) if max_p > 0 else 0
 
             SESSION_STORE.append({
                 "day": day_name,
-                "top": top,
-                "height": height,
+                "start_min": start_min,
+                "end_min": end_min,
                 "text": f"{title}\n{used} / {max_p} ({percent}%)",
                 "color": heat_color(percent),
             })
@@ -135,6 +110,31 @@ def sync_week_sessions():
             continue
 
 
+def build_time_axis():
+    if not TIME_POINTS:
+        return [], 0, 0
+
+    sorted_points = sorted(TIME_POINTS)
+    base = sorted_points[0]
+    end = sorted_points[-1]
+
+    labels = []
+    last = None
+    for m in sorted_points:
+        if last is None or m - last >= 30:
+            h = m // 60
+            mm = m % 60
+            labels.append({
+                "label": f"{h:02d}:{mm:02d}",
+                "top": m - base,
+            })
+            last = m
+
+    height = end - base
+    return labels, base, height
+
+
+# ---------- HTML ----------
 HTML = """
 <!doctype html>
 <html>
@@ -143,19 +143,34 @@ HTML = """
 <title>Wochenkalender – Auslastung (%)</title>
 <style>
 body { font-family: Arial, sans-serif; }
-.calendar { display:grid; grid-template-columns:80px repeat(5,1fr); }
-.header { text-align:center; font-weight:bold; padding:6px; }
-.times { position:relative; height:{{ total_height }}px; }
-.time { position:absolute; font-size:11px; }
-.day { position:relative; height:{{ total_height }}px; border-left:1px solid #ccc; }
+.calendar {
+    display: grid;
+    grid-template-columns: 90px repeat(5, 1fr);
+}
+.header {
+    text-align: center;
+    font-weight: bold;
+    padding: 6px;
+}
+.times {
+    position: relative;
+}
+.time {
+    position: absolute;
+    font-size: 11px;
+}
+.day {
+    position: relative;
+    border-left: 1px solid #ccc;
+}
 .session {
-    position:absolute;
-    left:5px;
-    right:5px;
-    padding:4px;
-    border-radius:4px;
-    font-size:11px;
-    white-space:pre-line;
+    position: absolute;
+    left: 5px;
+    right: 5px;
+    padding: 4px;
+    border-radius: 4px;
+    font-size: 11px;
+    white-space: pre-line;
 }
 </style>
 </head>
@@ -169,21 +184,25 @@ body { font-family: Arial, sans-serif; }
         <div class="header">{{ d }}</div>
     {% endfor %}
 
-    <div class="times">
-        {% for t in slots %}
-        <div class="time" style="top:{{ t.top }}px;">{{ t.label }}</div>
+    <div class="times" style="height: {{ height }}px;">
+        {% for t in times %}
+            <div class="time" style="top: {{ t.top }}px;">{{ t.label }}</div>
         {% endfor %}
     </div>
 
     {% for d in days %}
-    <div class="day" id="c{{ d }}"></div>
+        <div class="day" id="c{{ d }}" style="height: {{ height }}px;"></div>
     {% endfor %}
 </div>
 
 {% for s in sessions %}
 <div class="session"
      data-day="{{ s.day }}"
-     style="top:{{ s.top }}px; height:{{ s.height }}px; background:{{ s.color }};">
+     style="
+        top: {{ s.start_min - base_time }}px;
+        height: {{ s.end_min - s.start_min }}px;
+        background: {{ s.color }};
+     ">
 {{ s.text }}
 </div>
 {% endfor %}
@@ -199,21 +218,21 @@ document.querySelectorAll(".session").forEach(el => {
 </html>
 """
 
-
+# ---------- ROUTE ----------
 @app.route("/", methods=["GET", "HEAD"])
 def main():
     if request.method == "GET":
-        try:
-            sync_week_sessions()
-        except Exception:
-            pass
+        sync_wed_to_sun()
+
+    times, base_time, height = build_time_axis()
 
     return render_template_string(
         HTML,
         days=DISPLAY_DAYS,
         sessions=SESSION_STORE,
-        slots=build_time_slots(),
-        total_height=TOTAL_HEIGHT,
+        times=times,
+        base_time=base_time,
+        height=height,
     )
 
 
