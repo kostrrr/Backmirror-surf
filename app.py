@@ -4,7 +4,7 @@ import ssl
 from datetime import datetime, timedelta
 from urllib.request import urlopen, Request
 from urllib.parse import urlencode
-from flask import Flask, render_template_string, request
+from flask import Flask, render_template_string
 
 app = Flask(__name__)
 
@@ -18,12 +18,7 @@ ALL_WEEKDAYS = {
     6: "Sonntag",
 }
 
-DISPLAY_DAYS = ["Mittwoch", "Donnerstag", "Freitag", "Samstag", "Sonntag"]
-
 PIXELS_PER_MINUTE = 1
-
-SESSION_ITEMS = []
-TIME_POINTS = []
 
 
 def heat_color(percent):
@@ -39,11 +34,11 @@ def heat_color(percent):
 
 
 def to_minutes(hm):
-    h, m = map(int, hm.split(":"))
-    return h * 60 + m
+    h, m = hm.split(":")
+    return int(h) * 60 + int(m)
 
 
-def fetch_sessions_wide_range():
+def fetch_sessions():
     today = datetime.now().date()
     start_date = (today - timedelta(days=14)).strftime("%Y-%m-%d")
     end_date = (today + timedelta(days=21)).strftime("%Y-%m-%d")
@@ -73,53 +68,23 @@ def fetch_sessions_wide_range():
     return payload.get("items", [])
 
 
-def determine_week_from_data(items):
-    dates = sorted(
-        {
-            datetime.strptime(item["event_date"], "%Y-%m-%d").date()
-            for item in items
-            if item.get("event_date")
-        }
-    )
-    if not dates:
-        return None, None
+def build_calendar():
+    raw = fetch_sessions()
+    if not raw:
+        return []
 
-    first_date = dates[0]
-    weekday = first_date.weekday()
-    delta_to_wed = (weekday - 2) % 7
-    week_wed = first_date - timedelta(days=delta_to_wed)
-    week_sun = week_wed + timedelta(days=4)
+    days = {}
 
-    return week_wed, week_sun
-
-
-def build_view_data():
-    SESSION_ITEMS.clear()
-    TIME_POINTS.clear()
-
-    raw_items = fetch_sessions_wide_range()
-    if not raw_items:
-        return 0, 0
-
-    week_start, week_end = determine_week_from_data(raw_items)
-    if not week_start:
-        return 0, 0
-
-    for item in raw_items:
+    for item in raw:
         try:
-            event_date = datetime.strptime(item["event_date"], "%Y-%m-%d").date()
-            if not (week_start <= event_date <= week_end):
-                continue
-
-            weekday_idx = event_date.weekday()
-            day_name = ALL_WEEKDAYS.get(weekday_idx)
-            if day_name not in DISPLAY_DAYS:
-                continue
-
+            event_date = item.get("event_date")
             start = item.get("start")
             end = item.get("end")
-            if not start or not end:
+            if not event_date or not start or not end:
                 continue
+
+            date_obj = datetime.strptime(event_date, "%Y-%m-%d").date()
+            weekday_label = ALL_WEEKDAYS[date_obj.weekday()]
 
             start_min = to_minutes(start)
             end_min = to_minutes(end)
@@ -131,39 +96,59 @@ def build_view_data():
             percent = int((used / max_p) * 100) if max_p > 0 else 0
             title = (item.get("title") or "Session").strip()
 
-            TIME_POINTS.append(start_min)
-            TIME_POINTS.append(end_min)
+            if event_date not in days:
+                days[event_date] = {
+                    "label": f"{weekday_label} {date_obj.strftime('%d.%m')}",
+                    "sessions": [],
+                    "times": set(),
+                }
 
-            SESSION_ITEMS.append({
-                "day": day_name,
-                "start_min": start_min,
-                "end_min": end_min,
+            days[event_date]["times"].add(start_min)
+            days[event_date]["times"].add(end_min)
+
+            days[event_date]["sessions"].append({
+                "start": start_min,
+                "end": end_min,
                 "text": f"{title}\n{used} / {max_p} ({percent}%)",
                 "color": heat_color(percent),
             })
         except Exception:
             continue
 
-    if not TIME_POINTS:
-        return 0, 0
+    calendar = []
 
-    base_time = min(TIME_POINTS)
-    total_height = max(TIME_POINTS) - base_time
-    return base_time, total_height
+    for date_key in sorted(days.keys()):
+        d = days[date_key]
+        base = min(d["times"])
+        end = max(d["times"])
+        height = end - base
 
+        slots = []
+        for m in sorted(d["times"]):
+            h = m // 60
+            mm = m % 60
+            slots.append({
+                "label": f"{h:02d}:{mm:02d}",
+                "top": (m - base) * PIXELS_PER_MINUTE,
+            })
 
-def build_time_labels(base_time):
-    labels = []
-    for m in sorted(set(TIME_POINTS)):
-        if m < base_time:
-            continue
-        h = m // 60
-        mm = m % 60
-        labels.append({
-            "label": f"{h:02d}:{mm:02d}",
-            "top": (m - base_time) * PIXELS_PER_MINUTE,
+        sessions = []
+        for s in d["sessions"]:
+            sessions.append({
+                "top": (s["start"] - base) * PIXELS_PER_MINUTE,
+                "height": (s["end"] - s["start"]) * PIXELS_PER_MINUTE,
+                "text": s["text"],
+                "color": s["color"],
+            })
+
+        calendar.append({
+            "label": d["label"],
+            "height": height * PIXELS_PER_MINUTE,
+            "slots": slots,
+            "sessions": sessions,
         })
-    return labels
+
+    return calendar
 
 
 HTML = """
@@ -174,30 +159,15 @@ HTML = """
 <title>Wochenkalender – Auslastung (%)</title>
 <style>
 body { font-family: Arial, sans-serif; }
-.calendar {
-    display: grid;
-    grid-template-columns: 90px repeat(5, 1fr);
-}
-.header {
-    text-align: center;
-    font-weight: bold;
-    padding: 6px;
-}
-.times {
-    position: relative;
-}
-.time {
-    position: absolute;
-    font-size: 11px;
-}
-.day {
-    position: relative;
-    border-left: 1px solid #ccc;
-}
+.days { display: flex; gap: 20px; }
+.day { position: relative; padding-left: 60px; border-left: 1px solid #ccc; }
+.day-title { font-weight: bold; margin-bottom: 6px; }
+.timeline { position: relative; }
+.time { position: absolute; left: -55px; font-size: 11px; }
 .session {
     position: absolute;
-    left: 5px;
-    right: 5px;
+    left: 0;
+    right: 10px;
     padding: 4px;
     border-radius: 4px;
     font-size: 11px;
@@ -209,64 +179,34 @@ body { font-family: Arial, sans-serif; }
 
 <h2>Wochenkalender – Auslastung (%)</h2>
 
-<div class="calendar">
-    <div></div>
-    {% for d in days %}
-        <div class="header">{{ d }}</div>
-    {% endfor %}
-
-    <div class="times" style="height: {{ height }}px;">
-        {% for t in times %}
-            <div class="time" style="top: {{ t.top }}px;">{{ t.label }}</div>
-        {% endfor %}
+<div class="days">
+{% for d in calendar %}
+  <div class="day">
+    <div class="day-title">{{ d.label }}</div>
+    <div class="timeline" style="height: {{ d.height }}px;">
+      {% for t in d.slots %}
+        <div class="time" style="top: {{ t.top }}px;">{{ t.label }}</div>
+      {% endfor %}
+      {% for s in d.sessions %}
+        <div class="session"
+             style="top: {{ s.top }}px; height: {{ s.height }}px; background: {{ s.color }};">
+          {{ s.text }}
+        </div>
+      {% endfor %}
     </div>
-
-    {% for d in days %}
-        <div class="day" id="c{{ d }}" style="height: {{ height }}px;"></div>
-    {% endfor %}
-</div>
-
-{% for s in sessions %}
-<div class="session"
-     data-day="{{ s.day }}"
-     style="
-        top: {{ (s.start_min - base_time) }}px;
-        height: {{ (s.end_min - s.start_min) }}px;
-        background: {{ s.color }};
-     ">
-{{ s.text }}
-</div>
+  </div>
 {% endfor %}
-
-<script>
-document.querySelectorAll(".session").forEach(el => {
-    const col = document.getElementById("c" + el.dataset.day);
-    if (col) col.appendChild(el);
-});
-</script>
+</div>
 
 </body>
 </html>
 """
 
 
-@app.route("/", methods=["GET", "HEAD"])
+@app.route("/")
 def main():
-    if request.method == "GET":
-        base_time, height = build_view_data()
-    else:
-        base_time, height = 0, 0
-
-    times = build_time_labels(base_time)
-
-    return render_template_string(
-        HTML,
-        days=DISPLAY_DAYS,
-        sessions=SESSION_ITEMS,
-        times=times,
-        base_time=base_time,
-        height=height,
-    )
+    calendar = build_calendar()
+    return render_template_string(HTML, calendar=calendar)
 
 
 if __name__ == "__main__":
