@@ -18,22 +18,19 @@ ALL_WEEKDAYS = {
     6: "Sonntag",
 }
 
+DISPLAY_WEEKDAYS = [2, 3, 4, 5, 6]  # Mi–So
 PIXELS_PER_MINUTE = 2
 
 
-def heat_color(percent: int) -> str:
-    if percent >= 90:
-        return "#b00000"
-    if percent >= 70:
-        return "#d9480f"
-    if percent >= 50:
-        return "#f49300"
-    if percent >= 30:
-        return "#ffd43b"
+def heat_color(p):
+    if p >= 90: return "#b00000"
+    if p >= 70: return "#d9480f"
+    if p >= 50: return "#f49300"
+    if p >= 30: return "#ffd43b"
     return "#fff4cc"
 
 
-def minutes_from_iso(ts: str) -> int:
+def minutes_from_iso(ts):
     dt = datetime.fromisoformat(ts)
     return dt.hour * 60 + dt.minute
 
@@ -47,41 +44,63 @@ def fetch_sessions():
         "filter": "is_deleted=false && source='coremanager' && source_category_id=4",
         "fields": "event_date,start,end,title,participants_count,max_participants",
     }
-
     url = "https://oana.asdf.ooo/api/collections/sessions/records?" + urlencode(params)
     req = Request(url, headers={"User-Agent": "Mozilla/5.0"})
-    context = ssl.create_default_context()
+    ctx = ssl.create_default_context()
+    with urlopen(req, timeout=30, context=ctx) as r:
+        return json.loads(r.read().decode()).get("items", [])
 
-    with urlopen(req, timeout=30, context=context) as r:
-        return json.loads(r.read().decode("utf-8")).get("items", [])
 
-
-def get_week_bounds(ref):
+def week_bounds(ref):
     wd = ref.weekday()
-    wed = ref - timedelta(days=(wd - 2) % 7)
-    sun = wed + timedelta(days=4)
-    return wed, sun
+    start = ref - timedelta(days=(wd - 2) % 7)
+    end = start + timedelta(days=4)
+    return start, end
 
 
-# ---------------- WEEK VIEW ----------------
-def build_week_calendar(week_offset):
-    ref = date.today() + timedelta(weeks=week_offset)
-    ws, we = get_week_bounds(ref)
+# ---------- SHARED CALENDAR BUILDER ----------
+def build_calendar(dayslots):
+    calendar = []
+    for key in sorted(dayslots):
+        day = dayslots[key]
+        base = min(day["times"])
+        top = max(day["times"])
+        height = (top - base) * PIXELS_PER_MINUTE
 
+        calendar.append({
+            "label": day["label"],
+            "height": height,
+            "slots": [{
+                "label": f"{m//60:02d}:{m%60:02d}",
+                "top": (m - base) * PIXELS_PER_MINUTE
+            } for m in sorted(day["times"])],
+            "sessions": [{
+                "top": (s["start"] - base) * PIXELS_PER_MINUTE,
+                "height": (s["end"] - s["start"]) * PIXELS_PER_MINUTE,
+                "text": s["text"],
+                "color": s["color"],
+            } for s in day["sessions"]],
+        })
+    return calendar
+
+
+# ---------- WEEK VIEW ----------
+def build_week_view(offset):
+    ws, we = week_bounds(date.today() + timedelta(weeks=offset))
     days = {}
+
     for s in fetch_sessions():
         d = datetime.strptime(s["event_date"], "%Y-%m-%d").date()
-        if not (ws <= d <= we):
-            continue
+        if not (ws <= d <= we): continue
+        if d.weekday() not in DISPLAY_WEEKDAYS: continue
 
         sm = minutes_from_iso(s["start"])
         em = minutes_from_iso(s["end"])
-        if em <= sm:
-            continue
+        if em <= sm: continue
 
-        used = int(s.get("participants_count") or 0)
-        maxp = int(s.get("max_participants") or 0)
-        percent = int((used / maxp) * 100) if maxp > 0 else 0
+        used = int(s["participants_count"] or 0)
+        maxp = int(s["max_participants"] or 0)
+        pct = int((used / maxp) * 100) if maxp else 0
 
         key = d.isoformat()
         if key not in days:
@@ -95,87 +114,61 @@ def build_week_calendar(week_offset):
         days[key]["sessions"].append({
             "start": sm,
             "end": em,
-            "text": f"{s['title']}\n{used}/{maxp} ({percent}%)",
-            "color": heat_color(percent),
+            "text": f"{s['title']}\n{used}/{maxp} ({pct}%)",
+            "color": heat_color(pct),
         })
 
-    calendar = []
-    for k in sorted(days):
-        d = days[k]
-        base = min(d["times"])
-        top = max(d["times"])
-        height = (top - base) * PIXELS_PER_MINUTE
-
-        slots = [{
-            "label": f"{m//60:02d}:{m%60:02d}",
-            "top": (m - base) * PIXELS_PER_MINUTE
-        } for m in sorted(d["times"])]
-
-        sessions = [{
-            "top": (s["start"] - base) * PIXELS_PER_MINUTE,
-            "height": (s["end"] - s["start"]) * PIXELS_PER_MINUTE,
-            "text": s["text"],
-            "color": s["color"],
-        } for s in d["sessions"]]
-
-        calendar.append({
-            "label": d["label"],
-            "height": height,
-            "slots": slots,
-            "sessions": sessions,
-        })
-
-    return calendar, ws, we
+    return build_calendar(days), ws, we
 
 
-# ---------------- MONTH AVERAGE VIEW ----------------
-def build_month_average(year, month):
+# ---------- MONTH AVERAGE VIEW ----------
+def build_month_view(year, month):
     slots = {}
 
     for s in fetch_sessions():
         d = datetime.strptime(s["event_date"], "%Y-%m-%d").date()
-        if d.year != year or d.month != month:
-            continue
+        if d.year != year or d.month != month: continue
+        if d.weekday() not in DISPLAY_WEEKDAYS: continue
 
-        weekday = d.weekday()
         sm = minutes_from_iso(s["start"])
         em = minutes_from_iso(s["end"])
-        title = s["title"]
+        used = int(s["participants_count"] or 0)
+        maxp = int(s["max_participants"] or 0)
+        if maxp == 0: continue
 
-        used = int(s.get("participants_count") or 0)
-        maxp = int(s.get("max_participants") or 0)
-        if maxp == 0:
-            continue
+        pct = (used / maxp) * 100
+        key = (d.weekday(), sm, em, s["title"])
 
-        percent = (used / maxp) * 100
-
-        key = (weekday, sm, em, title)
-
-        if key not in slots:
-            slots[key] = {
-                "values": [],
-                "weekday": weekday,
-                "start": sm,
-                "end": em,
-                "title": title,
-            }
-
-        slots[key]["values"].append(percent)
-
-    rows = []
-    for s in slots.values():
-        avg = sum(s["values"]) / len(s["values"])
-        rows.append({
-            "weekday": ALL_WEEKDAYS[s["weekday"]],
-            "start": f"{s['start']//60:02d}:{s['start']%60:02d}",
-            "end": f"{s['end']//60:02d}:{s['end']%60:02d}",
+        slots.setdefault(key, {
+            "weekday": d.weekday(),
+            "start": sm,
+            "end": em,
             "title": s["title"],
-            "avg": round(avg),
-            "color": heat_color(int(avg)),
+            "values": []
+        })["values"].append(pct)
+
+    days = {}
+    for slot in slots.values():
+        avg = int(sum(slot["values"]) / len(slot["values"]))
+        wd = slot["weekday"]
+        fake_date = date(2026, 1, 5 + wd)  # stable weekday only
+        key = fake_date.isoformat()
+
+        days.setdefault(key, {
+            "label": ALL_WEEKDAYS[wd],
+            "times": set(),
+            "sessions": [],
         })
 
-    rows.sort(key=lambda r: (list(ALL_WEEKDAYS.values()).index(r["weekday"]), r["start"]))
-    return rows
+        days[key]["times"].update([slot["start"], slot["end"]])
+        days[key]["sessions"].append({
+            "start": slot["start"],
+            "end": slot["end"],
+            "text": f"{slot['title']}\nØ {avg}%",
+            "color": heat_color(avg),
+        })
+
+    return build_calendar(days)
 
 
 HTML = """
@@ -191,9 +184,6 @@ body{font-family:Arial;}
 .day{min-width:320px;padding-left:60px;border-left:1px solid #ccc;position:relative;}
 .time{position:absolute;left:-55px;font-size:11px;}
 .session{position:absolute;left:0;right:10px;padding:8px;border-radius:4px;}
-table{border-collapse:collapse;width:100%;}
-th,td{padding:6px;border-bottom:1px solid #ddd;text-align:left;}
-.badge{padding:4px 8px;border-radius:4px;color:#000;}
 </style>
 </head>
 <body>
@@ -201,11 +191,11 @@ th,td{padding:6px;border-bottom:1px solid #ddd;text-align:left;}
 <h2>{{ title }}</h2>
 
 <div class="nav">
-<a href="/?view=week">Woche</a> |
-<a href="/?view=month">Monat (Ø‑Auslastung)</a>
+<a href="/?view=week&week_offset={{ week_offset - 1 }}">◀ Vorige Woche</a> |
+<a href="/?view=week&week_offset={{ week_offset + 1 }}">Nächste Woche ▶</a> |
+<a href="/?view=month">Monat (Ø)</a>
 </div>
 
-{% if view == "week" %}
 <div class="days">
 {% for d in calendar %}
 <div class="day">
@@ -220,25 +210,6 @@ th,td{padding:6px;border-bottom:1px solid #ddd;text-align:left;}
 {% endfor %}
 </div>
 
-{% else %}
-<table>
-<tr>
-<th>Wochentag</th>
-<th>Zeit</th>
-<th>Session</th>
-<th>Ø Auslastung</th>
-</tr>
-{% for r in rows %}
-<tr>
-<td>{{ r.weekday }}</td>
-<td>{{ r.start }}–{{ r.end }}</td>
-<td>{{ r.title }}</td>
-<td><span class="badge" style="background:{{ r.color }}">{{ r.avg }}%</span></td>
-</tr>
-{% endfor %}
-</table>
-{% endif %}
-
 </body>
 </html>
 """
@@ -250,21 +221,21 @@ def main():
 
     if view == "month":
         today = date.today()
-        rows = build_month_average(today.year, today.month)
+        cal = build_month_view(today.year, today.month)
         return render_template_string(
             HTML,
-            view="month",
-            title=f"Monats‑Durchschnitt {today.strftime('%m.%Y')}",
-            rows=rows,
+            title=f"Monats‑Ø {today.strftime('%m.%Y')}",
+            calendar=cal,
+            week_offset=0
         )
 
-    week_offset = int(request.args.get("week_offset", 0))
-    calendar, ws, we = build_week_calendar(week_offset)
+    offset = int(request.args.get("week_offset", 0))
+    cal, ws, we = build_week_view(offset)
     return render_template_string(
         HTML,
-        view="week",
         title=f"Woche {ws.strftime('%d.%m')} – {we.strftime('%d.%m')}",
-        calendar=calendar,
+        calendar=cal,
+        week_offset=offset
     )
 
 
