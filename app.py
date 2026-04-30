@@ -34,11 +34,8 @@ def heat_color(percent):
 
 
 def to_minutes(hm):
-    try:
-        h, m = hm.split(":")
-        return int(h) * 60 + int(m)
-    except Exception:
-        return None
+    h, m = hm.split(":")
+    return int(h) * 60 + int(m)
 
 
 def fetch_sessions():
@@ -80,17 +77,18 @@ def build_calendar():
             event_date = item.get("event_date")
             start = item.get("start")
             end = item.get("end")
-
             if not event_date or not start or not end:
                 continue
 
-            start_min = to_minutes(start)
-            end_min = to_minutes(end)
-            if start_min is None or end_min is None or end_min <= start_min:
+            date_obj = datetime.strptime(event_date, "%Y-%m-%d").date()
+            if date_obj < datetime.now().date():
                 continue
 
-            date_obj = datetime.strptime(event_date, "%Y-%m-%d").date()
             weekday_label = ALL_WEEKDAYS[date_obj.weekday()]
+            start_min = to_minutes(start)
+            end_min = to_minutes(end)
+            if end_min <= start_min:
+                continue
 
             used = int(item.get("participants_count") or 0)
             max_p = int(item.get("max_participants") or 0)
@@ -118,14 +116,11 @@ def build_calendar():
 
     calendar = []
 
-    for date_key in sorted(days.keys()):
+    for date_key in sorted(days.keys())[:7]:
         d = days[date_key]
-        if not d["times"]:
-            continue
-
         base = min(d["times"])
-        top = max(d["times"])
-        height = top - base
+        end = max(d["times"])
+        height = end - base
 
         slots = []
         for m in sorted(d["times"]):
