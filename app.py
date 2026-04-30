@@ -1,7 +1,7 @@
 import os
 import json
 import ssl
-from datetime import datetime, timedelta
+from datetime import datetime
 from urllib.request import urlopen, Request
 from urllib.parse import urlencode
 from flask import Flask, render_template_string
@@ -34,30 +34,21 @@ def heat_color(percent):
 
 
 def to_minutes(hm):
-    h, m = hm.split(":")
-    return int(h) * 60 + int(m)
+    try:
+        h, m = hm.split(":")
+        return int(h) * 60 + int(m)
+    except Exception:
+        return None
 
 
 def fetch_sessions():
-    today = datetime.now().date()
-    start_date = (today - timedelta(days=7)).strftime("%Y-%m-%d")
-    end_date = (today + timedelta(days=14)).strftime("%Y-%m-%d")
-
     params = {
         "page": 1,
         "perPage": 1000,
         "skipTotal": 1,
         "sort": "event_date,start",
-        "filter": (
-            "is_deleted=false && "
-            "source='coremanager' && "
-            "source_category_id=4 && "
-            f"event_date>='{start_date}' && event_date<='{end_date}'"
-        ),
-        "fields": (
-            "event_date,start,end,title,"
-            "participants_count,max_participants"
-        ),
+        "filter": "is_deleted=false && source='coremanager' && source_category_id=4",
+        "fields": "event_date,start,end,title,participants_count,max_participants",
     }
 
     url = "https://oana.asdf.ooo/api/collections/sessions/records?" + urlencode(params)
@@ -72,13 +63,16 @@ def fetch_sessions():
 
     context = ssl.create_default_context()
     with urlopen(req, timeout=30, context=context) as response:
-        payload = json.loads(response.read().decode("utf-8"))
+        data = json.loads(response.read().decode("utf-8"))
 
-    return payload.get("items", [])
+    return data.get("items", [])
 
 
 def build_calendar():
     raw = fetch_sessions()
+    if not raw:
+        return []
+
     days = {}
 
     for item in raw:
@@ -86,16 +80,17 @@ def build_calendar():
             event_date = item.get("event_date")
             start = item.get("start")
             end = item.get("end")
+
             if not event_date or not start or not end:
+                continue
+
+            start_min = to_minutes(start)
+            end_min = to_minutes(end)
+            if start_min is None or end_min is None or end_min <= start_min:
                 continue
 
             date_obj = datetime.strptime(event_date, "%Y-%m-%d").date()
             weekday_label = ALL_WEEKDAYS[date_obj.weekday()]
-
-            start_min = to_minutes(start)
-            end_min = to_minutes(end)
-            if end_min <= start_min:
-                continue
 
             used = int(item.get("participants_count") or 0)
             max_p = int(item.get("max_participants") or 0)
@@ -125,9 +120,12 @@ def build_calendar():
 
     for date_key in sorted(days.keys()):
         d = days[date_key]
+        if not d["times"]:
+            continue
+
         base = min(d["times"])
-        end = max(d["times"])
-        height = end - base
+        top = max(d["times"])
+        height = top - base
 
         slots = []
         for m in sorted(d["times"]):
