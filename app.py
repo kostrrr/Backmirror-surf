@@ -22,7 +22,7 @@ DISPLAY_WEEKDAYS = [2, 3, 4, 5, 6]  # Mi–So
 PIXELS_PER_MINUTE = 2
 
 
-def heat_color(p):
+def heat_color(p: int) -> str:
     if p >= 90:
         return "#b00000"
     if p >= 70:
@@ -34,7 +34,7 @@ def heat_color(p):
     return "#fff4cc"
 
 
-def minutes_from_iso(ts):
+def minutes_from_iso(ts: str) -> int:
     dt = datetime.fromisoformat(ts)
     return dt.hour * 60 + dt.minute
 
@@ -55,14 +55,14 @@ def fetch_sessions():
         return json.loads(r.read().decode("utf-8")).get("items", [])
 
 
-def week_bounds(ref):
+def week_bounds(ref: date):
     wd = ref.weekday()
     start = ref - timedelta(days=(wd - 2) % 7)
     end = start + timedelta(days=4)
     return start, end
 
 
-def month_from_offset(offset):
+def month_from_offset(offset: int):
     today = date.today()
     y = today.year
     m = today.month + offset
@@ -75,14 +75,16 @@ def month_from_offset(offset):
     return y, m
 
 
-def year_from_offset(offset):
+def year_from_offset(offset: int):
     return date.today().year + offset
 
 
-def build_calendar(days):
+def build_calendar(days: dict):
     calendar = []
     for key in sorted(days):
         d = days[key]
+        if not d["times"]:
+            continue
         base = min(d["times"])
         top = max(d["times"])
         calendar.append({
@@ -108,7 +110,7 @@ def build_calendar(days):
     return calendar
 
 
-def build_week_view(offset):
+def build_week_view(offset: int):
     ws, we = week_bounds(date.today() + timedelta(weeks=offset))
     days = {}
     for s in fetch_sessions():
@@ -140,7 +142,7 @@ def build_week_view(offset):
     return build_calendar(days), ws, we
 
 
-def build_slot_average(year, month=None):
+def build_slot_average(year: int, month: int | None):
     slots = {}
     for s in fetch_sessions():
         d = datetime.strptime(s["event_date"], "%Y-%m-%d").date()
@@ -148,7 +150,7 @@ def build_slot_average(year, month=None):
             continue
         if d.year != year:
             continue
-        if month and d.month != month:
+        if month is not None and d.month != month:
             continue
         sm = minutes_from_iso(s["start"])
         em = minutes_from_iso(s["end"])
@@ -168,7 +170,7 @@ def build_slot_average(year, month=None):
 
     days = {}
     for slot in slots.values():
-        avg = int(sum(slot["values"]) / len(slot["values"]))
+        avg = int(round(sum(slot["values"]) / len(slot["values"])))
         wd = slot["weekday"]
         fake_date = date(2026, 1, 5 + wd).isoformat()
         days.setdefault(fake_date, {
@@ -183,22 +185,22 @@ def build_slot_average(year, month=None):
             "text": f"{slot['title']}\nØ {avg}%",
             "color": heat_color(avg),
         })
+
     return build_calendar(days)
 
 
-HTML = """
-<!doctype html>
+HTML = """<!doctype html>
 <html>
 <head>
 <meta charset="utf-8">
 <title>Auslastung</title>
 <style>
-body { font-family: Arial; }
-.nav { margin-bottom: 12px; }
-.days { display: flex; gap: 24px; }
-.day { min-width: 320px; padding-left: 60px; border-left: 1px solid #ccc; position: relative; }
-.time { position: absolute; left: -55px; font-size: 11px; }
-.session { position: absolute; left: 0; right: 10px; padding: 8px; border-radius: 4px; }
+body{font-family:Arial;}
+.nav{margin-bottom:12px;}
+.days{display:flex;gap:24px;}
+.day{min-width:320px;padding-left:60px;border-left:1px solid #ccc;position:relative;}
+.time{position:absolute;left:-55px;font-size:11px;}
+.session{position:absolute;left:0;right:10px;padding:8px;border-radius:4px;}
 </style>
 </head>
 <body>
@@ -254,12 +256,12 @@ def main():
     if view == "month":
         mo = int(request.args.get("month_offset", 0))
         y, m = month_from_offset(mo)
-        cal = build_slot_average(y, m)
+        calendar = build_slot_average(y, m)
         return render_template_string(
             HTML,
             view="month",
             title=f"Monats‑Ø {m:02d}.{y}",
-            calendar=cal,
+            calendar=calendar,
             week_offset=0,
             month_offset=mo,
             year_offset=0,
@@ -268,24 +270,24 @@ def main():
     if view == "year":
         yo = int(request.args.get("year_offset", 0))
         y = year_from_offset(yo)
-        cal = build_slot_average(y, None)
+        calendar = build_slot_average(y, None)
         return render_template_string(
             HTML,
             view="year",
             title=f"Jahres‑Ø {y}",
-            calendar=cal,
+            calendar=calendar,
             week_offset=0,
             month_offset=0,
             year_offset=yo,
         )
 
     wo = int(request.args.get("week_offset", 0))
-    cal, ws, we = build_week_view(wo)
+    calendar, ws, we = build_week_view(wo)
     return render_template_string(
         HTML,
         view="week",
         title=f"Woche {ws.strftime('%d.%m')} – {we.strftime('%d.%m')}",
-        calendar=cal,
+        calendar=calendar,
         week_offset=wo,
         month_offset=0,
         year_offset=0,
@@ -293,4 +295,4 @@ def main():
 
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0
+    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
